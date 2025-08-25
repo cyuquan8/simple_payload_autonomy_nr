@@ -9,7 +9,7 @@ import time
 import socket
 import serial
 
-#from dronekit import connect, VehicleMode, LocationGlobalRelative
+from dronekit import connect, VehicleMode, LocationGlobalRelative
 from dataclasses import dataclass
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
@@ -124,7 +124,7 @@ class IMX500Detector:
         # Setup comms
         if not args.debug:
             self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            #vehicle = connect(self.rpi_serial_port, wait_ready=True, baud=self.rpi_baud_rate)
+            self.vehicle=connect(self.rpi_serial_port, wait_ready=True, baud=self.rpi_baud_rate)
         
     @property
     def logger(self):
@@ -305,7 +305,9 @@ class IMX500Detector:
         
                 # Print when a target is detected with high confidence
                 if detected_class in classes:
-                    message=(f"{self.intrinsics.labels[detected_class]} detected with {confidence:.2f} confidence!")
+                    location=self.vehicle.location.global_frame
+                    message=(f"{self.intrinsics.labels[detected_class]} detected @ {location} with {confidence:.2f} confidence!")
+                    self._logger.debug(message)
                     data=message.encode('utf-8')
                     self.sock.sendto(data, (self.udp_ip, self.udp_port))
     
@@ -329,6 +331,12 @@ def get_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Debugging mode. Runs detect()"
+    )
+    parser.add_argument(
+        "--show-preview",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Show preview of detection"
     )
     
     # Directories
@@ -436,7 +444,8 @@ def get_args():
     
     # Detection parameters``
     parser.add_argument(
-        "--detect-classes", 
+        "--detect-classes",
+        default=0, 
         nargs="+",
         help="List of classes (int) to detect",
         type=int
@@ -475,7 +484,7 @@ def get_args():
     # Comms parameters
     parser.add_argument(
         "--udp-ip",
-        default="192.168.0.103",
+        default="192.168.0.109",
         help="UDP IP Address",
         type=str
     )
@@ -505,7 +514,7 @@ def main():
     try:
         args = get_args()
         detector = IMX500Detector(args)
-        detector.start()
+        detector.start(show_preview=args.show_preview)
         if args.debug:
             detector.detect()
         else:
