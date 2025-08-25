@@ -6,7 +6,10 @@ import logging
 import os
 import sys
 import time
+import socket
+import serial
 
+#from dronekit import connect, VehicleMode, LocationGlobalRelative
 from dataclasses import dataclass
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
@@ -108,9 +111,20 @@ class IMX500Detector:
                 if label and label != "-"
             ]
 
-        # 
+        # Store detections
         self.last_detections: list[Detection] = []
         self.last_results: list[Detection] = None
+        
+        # Connection parameters
+        self.rpi_baud_rate = args.rpi_baud_rate
+        self.rpi_serial_port = args.rpi_serial_port
+        self.udp_ip = args.udp_ip
+        self.udp_port = args.udp_port
+        
+        # Setup comms
+        if not args.debug:
+            self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            #vehicle = connect(self.rpi_serial_port, wait_ready=True, baud=self.rpi_baud_rate)
         
     @property
     def logger(self):
@@ -279,7 +293,24 @@ class IMX500Detector:
     
     def detect_and_pub(self, classes: list[int]):
         """ Run detection and publish info for interested classes """
-        pass
+        while True:
+            # Get the latest detections
+            self.last_results = self.parse_detections(
+                self.picam2.capture_metadata()
+            )
+            
+            for detection in self.last_results:
+                detected_class = detection.category
+                confidence = detection.conf
+        
+                # Print when a target is detected with high confidence
+                if detected_class in classes:
+                    message=(f"{self.intrinsics.labels[detected_class]} detected with {confidence:.2f} confidence!")
+                    data=message.encode('utf-8')
+                    self.sock.sendto(data, (self.udp_ip, self.udp_port))
+    
+            # Small delay to prevent overwhelming the system
+            time.sleep(0.1)
     
 def get_args():
     parser = argparse.ArgumentParser()
@@ -403,7 +434,7 @@ def get_args():
         help="Use default intrinsics parameters"
     )
     
-    # Detection parameters
+    # Detection parameters``
     parser.add_argument(
         "--detect-classes", 
         nargs="+",
@@ -439,6 +470,32 @@ def get_args():
         action=argparse.BooleanOptionalAction,
         default=True, 
         help="Whether to flip input image over vertical plane"
+    )
+    
+    # Comms parameters
+    parser.add_argument(
+        "--udp-ip",
+        default="192.168.0.103",
+        help="UDP IP Address",
+        type=str
+    )
+    parser.add_argument(
+        "--udp-port",
+        default=14550,
+        help="UDP Port",
+        type=int
+    )
+    parser.add_argument(
+        "--rpi-baud-rate",
+        default=57600,
+        help="Raspberry Pi to FCU Baud rate",
+        type=int
+    )
+    parser.add_argument(
+        "--rpi-serial-port",
+        default="/dev/ttyAMA0",
+        help="Raspberry Pi Serial Port",
+        type=str
     )
     
     return parser.parse_args()
