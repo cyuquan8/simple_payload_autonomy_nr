@@ -308,7 +308,10 @@ class IMX500Detector:
         # TODO: Add servo control code
 
     def detect(self, classes: list[int]):
-        """ Run detection only (without camera pitch correction using servo) """
+        """ 
+        Run detection only (without camera pitch correction using servo) 
+        NOTE: Does not connect to vehicle using dronekit
+        """
         # No interested classes -> All classes
         if len(classes) == 0:
             classes = [i for i in range(len(self.labels))]
@@ -322,18 +325,13 @@ class IMX500Detector:
             for detection in self.last_results:
                 d_cls = detection.category
                 conf = detection.conf
-        
                 # Print when a target is detected with high confidence
                 if d_cls in classes:
-                    loc=self.vehicle.location.global_frame
-
-                    # Message
                     msg=(
                         f"{datetime.now()}: {self.intrinsics.labels[d_cls]} "
-                        f"detected @ {loc} with {conf:.2f} confidence"
+                        f"detected with {conf:.2f} confidence"
                     )
                     self._logger.debug(msg)
-
                     if self.udp_pub:
                         msg_data=msg.encode('utf-8')
                         self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
