@@ -9,6 +9,7 @@ import time
 import socket
 import serial
 
+from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 from dataclasses import dataclass
 from picamera2 import MappedArray, Picamera2
@@ -33,7 +34,8 @@ class IMX500Detector:
         # Add StreamHandler
         handler = logging.StreamHandler()
         formatter = logging.Formatter(
-            "%(name)s - %(levelname)s - %(message)s"
+            "%(name)s - %(asctime)s - %(levelname)s - %(message)s",
+            datefmt='%Y-%m-%d %H:%M:%S'
         )
         handler.setFormatter(formatter)
         self._logger.addHandler(handler)
@@ -124,7 +126,11 @@ class IMX500Detector:
         # Setup comms
         if not args.debug:
             self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.vehicle=connect(self.rpi_serial_port, wait_ready=True, baud=self.rpi_baud_rate)
+            self.vehicle=connect(
+                self.rpi_serial_port, 
+                wait_ready=True, 
+                baud=self.rpi_baud_rate
+            )
         
     @property
     def logger(self):
@@ -168,12 +174,22 @@ class IMX500Detector:
                     max_out_dets=self.max_detections
                 )[0]
             from picamera2.devices.imx500.postprocess import scale_boxes
-            boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+            boxes = scale_boxes(
+                boxes, 
+                1, 
+                1, 
+                input_h, 
+                input_w, 
+                False, 
+                False
+            )
         else:
             # boxes (num_class, 4)
             # scores (num_class, )
             # classes (num_class, )
-            boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+            boxes = np_outputs[0][0]
+            scores = np_outputs[1][0]
+            classes = np_outputs[2][0]
             if self.intrinsics.bbox_normalization:
                 # Assumes input_h == input_w
                 boxes = boxes / input_h
@@ -306,7 +322,12 @@ class IMX500Detector:
                 # Print when a target is detected with high confidence
                 if detected_class in classes:
                     location=self.vehicle.location.global_frame
-                    message=(f"{self.intrinsics.labels[detected_class]} detected @ {location} with {confidence:.2f} confidence!")
+                    message=(
+                        f"{datetime.now()}: "
+                        f"{self.intrinsics.labels[detected_class]} "
+                        f"detected @ {location} with "
+                        f"{confidence:.2f} confidence"
+                    )
                     self._logger.debug(message)
                     data=message.encode('utf-8')
                     self.sock.sendto(data, (self.udp_ip, self.udp_port))
@@ -334,9 +355,9 @@ def get_args():
     )
     parser.add_argument(
         "--show-preview",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Show preview of detection"
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show preview of detection"
     )
     
     # Directories
