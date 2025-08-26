@@ -314,7 +314,7 @@ class IMX500Detector:
             self.last_results = self.parse_detections(
                 self.picam2.capture_metadata()
             )
-            
+
             for detection in self.last_results:
                 detected_class = detection.category
                 confidence = detection.conf
@@ -322,6 +322,8 @@ class IMX500Detector:
                 # Print when a target is detected with high confidence
                 if detected_class in classes:
                     location=self.vehicle.location.global_frame
+
+                    # Message
                     message=(
                         f"{datetime.now()}: "
                         f"{self.intrinsics.labels[detected_class]} "
@@ -330,6 +332,9 @@ class IMX500Detector:
                     )
                     self._logger.debug(message)
                     data=message.encode('utf-8')
+
+                    # TODO: Get the detection image, encode to bytes and pub
+
                     self.sock.sendto(data, (self.udp_ip, self.udp_port))
     
             # Small delay to prevent overwhelming the system
