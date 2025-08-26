@@ -113,8 +113,10 @@ class IMX500Detector:
                 if label and label != "-"
             ]
 
-        # Store detections
+        # Store detections and corresponding image frame
+        # TODO: Need last_dectections and last_results? Potential refactor
         self.last_detections: list[Detection] = []
+        self.last_detections_image = None # TODO: Add typing
         self.last_results: list[Detection] = None
         
         # Connection parameters
