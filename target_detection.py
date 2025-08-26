@@ -4,10 +4,8 @@ import numpy as np
 import libcamera
 import logging
 import os
-import sys
 import time
 import socket
-import serial
 
 from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
@@ -42,6 +40,7 @@ class IMX500Detector:
         
         # Get model path
         self.model_type = args.model_type
+        model_rpk_name = None
         if args.model_type == "yolo8n":
             model_rpk_name = "imx500_network_yolov8n_pp.rpk"
         elif args.model_type == "yolo11n":
@@ -60,6 +59,7 @@ class IMX500Detector:
         
         # Get label path
         self.labels = args.labels
+        labels_name = None
         if args.labels == "coco":
             labels_name = "coco_labels.txt"
         labels_path = os.path.join(args.labels_dir, labels_name)
@@ -117,22 +117,24 @@ class IMX500Detector:
         # TODO: Need last_dectections and last_results? Potential refactor
         self.last_detections: list[Detection] = []
         self.last_detections_image = None # TODO: Add typing
-        self.last_results: list[Detection] = None
+        self.last_results: list[Detection] = []
         
         # Connection parameters
         self.rpi_baud_rate = args.rpi_baud_rate
         self.rpi_serial_port = args.rpi_serial_port
         self.udp_ip = args.udp_ip
         self.udp_port = args.udp_port
+        self.udp_pub = args.udp_pub
         
         # Setup comms
-        if not args.debug:
-            self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if not args.debug_detect:
             self.vehicle=connect(
                 self.rpi_serial_port, 
                 wait_ready=True, 
                 baud=self.rpi_baud_rate
             )
+        if args.udp_pub:
+            self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
     @property
     def logger(self):
@@ -244,11 +246,13 @@ class IMX500Detector:
                 overlay = m.array.copy()
 
                 # Draw the background rectangle on the overlay
-                cv2.rectangle(overlay,
-                              (text_x, text_y - text_height),
-                              (text_x + text_width, text_y + baseline),
-                              (255, 255, 255), # White background color
-                              cv2.FILLED)
+                cv2.rectangle(
+                    overlay,
+                    (text_x, text_y - text_height),
+                    (text_x + text_width, text_y + baseline),
+                    (255, 255, 255), # White background color
+                    cv2.FILLED
+                )
 
                 alpha = 0.30
                 cv2.addWeighted(
@@ -299,18 +303,16 @@ class IMX500Detector:
                     (255, 0, 0, 0)
                 )
     
-    def detect(self):
-        """ Run detection """
-        while True:
-            # Get the latest detections
-            self.last_results = self.parse_detections(
-                self.picam2.capture_metadata()
-            )
-            # Small delay to prevent overwhelming the system
-            time.sleep(0.1)
-    
-    def detect_and_pub(self, classes: list[int]):
-        """ Run detection and publish info for interested classes """
+    def camera_pitch(self):
+        """" Run camera pitch correction with servo (without detection) """
+        # TODO: Add servo control code
+
+    def detect(self, classes: list[int]):
+        """ Run detection only (without camera pitch correction using servo) """
+        # No interested classes -> All classes
+        if len(classes) == 0:
+            classes = [i for i in range(len(self.labels))]
+
         while True:
             # Get the latest detections
             self.last_results = self.parse_detections(
@@ -318,26 +320,58 @@ class IMX500Detector:
             )
 
             for detection in self.last_results:
-                detected_class = detection.category
-                confidence = detection.conf
+                d_cls = detection.category
+                conf = detection.conf
         
                 # Print when a target is detected with high confidence
-                if detected_class in classes:
-                    location=self.vehicle.location.global_frame
+                if d_cls in classes:
+                    loc=self.vehicle.location.global_frame
 
                     # Message
-                    message=(
-                        f"{datetime.now()}: "
-                        f"{self.intrinsics.labels[detected_class]} "
-                        f"detected @ {location} with "
-                        f"{confidence:.2f} confidence"
+                    msg=(
+                        f"{datetime.now()}: {self.intrinsics.labels[d_cls]} "
+                        f"detected @ {loc} with {conf:.2f} confidence"
                     )
-                    self._logger.debug(message)
-                    data=message.encode('utf-8')
+                    self._logger.debug(msg)
 
-                    # TODO: Get the detection image, encode to bytes and pub
+                    if self.udp_pub:
+                        msg_data=msg.encode('utf-8')
+                        self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
 
-                    self.sock.sendto(data, (self.udp_ip, self.udp_port))
+            # Small delay to prevent overwhelming the system
+            time.sleep(0.1)
+    
+    def camera_pitch_detect(self, classes: list[int]):
+        """ Run camera pitch correction detection """
+        # No interested classes -> All classes
+        if len(classes) == 0:
+            classes = [i for i in range(len(self.labels))]
+
+        while True:
+            # Get the latest detections
+            self.last_results = self.parse_detections(
+                self.picam2.capture_metadata()
+            )
+
+            for detection in self.last_results:
+                d_cls = detection.category
+                conf = detection.conf
+        
+                # Print when a target is detected with high confidence
+                if d_cls in classes:
+                    loc=self.vehicle.location.global_frame
+
+                    # Message
+                    msg=(
+                        f"{datetime.now()}: {self.intrinsics.labels[d_cls]} "
+                        f"detected @ {loc} with {conf:.2f} confidence"
+                    )
+                    self._logger.debug(msg)
+
+                    if self.udp_pub:
+                        msg_data=msg.encode('utf-8')
+                        # TODO: Encode detection image to bytes and pub
+                        self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
     
             # Small delay to prevent overwhelming the system
             time.sleep(0.1)
@@ -355,7 +389,13 @@ def get_args():
     
     # Debug
     parser.add_argument(
-        "--debug",
+        "--debug-camera",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Debugging mode. Runs camera_pitch()"
+    )
+    parser.add_argument(
+        "--debug-detect",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Debugging mode. Runs detect()"
@@ -470,10 +510,10 @@ def get_args():
         help="Use default intrinsics parameters"
     )
     
-    # Detection parameters``
+    # Detection parameters
     parser.add_argument(
         "--detect-classes",
-        default=0, 
+        default=[],
         nargs="+",
         help="List of classes (int) to detect",
         type=int
@@ -511,6 +551,18 @@ def get_args():
     
     # Comms parameters
     parser.add_argument(
+        "--rpi-baud-rate",
+        default=57600,
+        help="Raspberry Pi to FCU Baud rate",
+        type=int
+    )
+    parser.add_argument(
+        "--rpi-serial-port",
+        default="/dev/ttyAMA0",
+        help="Raspberry Pi Serial Port",
+        type=str
+    )
+    parser.add_argument(
         "--udp-ip",
         default="192.168.0.109",
         help="UDP IP Address",
@@ -523,16 +575,10 @@ def get_args():
         type=int
     )
     parser.add_argument(
-        "--rpi-baud-rate",
-        default=57600,
-        help="Raspberry Pi to FCU Baud rate",
-        type=int
-    )
-    parser.add_argument(
-        "--rpi-serial-port",
-        default="/dev/ttyAMA0",
-        help="Raspberry Pi Serial Port",
-        type=str
+        "--udp-pub",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to pub results",
     )
     
     return parser.parse_args()
@@ -543,12 +589,14 @@ def main():
         args = get_args()
         detector = IMX500Detector(args)
         detector.start(show_preview=args.show_preview)
-        if args.debug:
-            detector.detect()
+        if args.debug_camera:
+            detector.camera_pitch()
+        elif args.debug_detect:
+            detector.detect(args.detect_classes)
         else:
-            detector.detect_and_pub(args.detect_classes)
+            detector.camera_pitch_detect(args.detect_classes)
     except KeyboardInterrupt as e:
-        detector.logger.info(f"{e}")
+        logging.error(f"{e}")
 
 if __name__ == "__main__":
     
