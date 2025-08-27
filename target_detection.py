@@ -28,19 +28,29 @@ class IMX500Detector:
         
         # Logger
         self._logger = logging.getLogger(self.__class__.__name__)
-        self._logger.setLevel(logging._nameToLevel.get(args.log_level))
-        # Add StreamHandler
-        handler = logging.StreamHandler()
+        self._logger.setLevel(logging._nameToLevel.get(args.log_level, "DEBUG"))
+        # Formatter
         formatter = logging.Formatter(
             "%(name)s - %(asctime)s - %(levelname)s - %(message)s",
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-        handler.setFormatter(formatter)
-        self._logger.addHandler(handler)
+        # Add StreamHandler
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        self._logger.addHandler(stream_handler)
+        # Add FileHandler with timestamp
+        os.makedirs(args.log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"target_detection_{timestamp}.log"
+        log_filepath = os.path.join(args.log_dir, log_filename)
+        file_handler = logging.FileHandler(log_filepath)
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging._nameToLevel.get(args.log_level, "DEBUG"))
+        self._logger.addHandler(file_handler)
         
         # Get model path
         self.model_type = args.model_type
-        model_rpk_name = None
+        model_rpk_name = ""
         if args.model_type == "yolo8n":
             model_rpk_name = "imx500_network_yolov8n_pp.rpk"
         elif args.model_type == "yolo11n":
@@ -59,7 +69,7 @@ class IMX500Detector:
         
         # Get label path
         self.labels = args.labels
-        labels_name = None
+        labels_name = ""
         if args.labels == "coco":
             labels_name = "coco_labels.txt"
         labels_path = os.path.join(args.labels_dir, labels_name)
@@ -420,6 +430,12 @@ def get_args():
     )
     
     # Logging
+    parser.add_argument(
+        "--log-dir",
+        default="./logs/target_detection/",
+        help="Directory to save log files with timestamps",
+        type=str
+    )
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
