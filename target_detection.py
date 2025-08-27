@@ -6,7 +6,9 @@ import logging
 import os
 import time
 import socket
+import math
 
+from rpi_hardware_pwm import HardwarePWM
 from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 from dataclasses import dataclass
@@ -316,6 +318,30 @@ class IMX500Detector:
     def camera_pitch(self):
         """" Run camera pitch correction with servo (without detection) """
         # TODO: Add servo control code
+        # Servo setup
+        pwm = HardwarePWM(0, 50)  # 50 Hz for servo
+        pwm.start(5)            # neutral (0 degrees)
+
+        base_angle = 35  # servo neutral position (camera tilted)
+        while True:
+            pitch = math.degrees(self.vehicle.attitude.pitch)
+            self._logger.debug(f"Pitch: {pitch:.2f} degrees")
+
+            # Compensate
+            servo_angle = base_angle - pitch  
+
+            # Limit servo movement
+            servo_angle = max(min(servo_angle, 90), 0)
+
+            # Convert angle to duty cycle
+            duty_cycle = 5 + (servo_angle / 90) * 5  
+
+            self._logger.debug(
+                f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
+            )
+            pwm.change_duty_cycle(duty_cycle)
+
+            time.sleep(0.02)  # 20 ms update
 
     def detect(self, classes: list[int]):
         """ 
