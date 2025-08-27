@@ -114,9 +114,9 @@ class IMX500Detector:
             ]
 
         # Store detections and corresponding image frame
-        # TODO: Need last_dectections and last_results? Potential refactor
         self.last_detections: list[Detection] = []
         self.last_detections_image = None # TODO: Add typing
+        # Store detections for preview. Safe due to GIL but might be stale
         self.last_results: list[Detection] = []
         
         # Connection parameters
