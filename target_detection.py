@@ -110,7 +110,12 @@ class IMX500Detector:
         
         # Camera parameters
         self.buffer_count = args.buffer_count
-        
+
+        # Servo parameters
+        self.pwm = HardwarePWM(0, 50)  # 50 Hz for servo
+        self.pwm.start(5)            # neutral (0 degrees)
+        self.base_angle = 35  # servo neutral position (camera tilted)
+
         # Detection parameters
         self.hflip = args.hflip
         self.iou = args.iou
@@ -315,20 +320,36 @@ class IMX500Detector:
                     (255, 0, 0, 0)
                 )
     
+    def _camera_servo(self):
+        """ Helper function to run camera pitch correction with camera detection """
+        pitch = math.degrees(self.vehicle.attitude.pitch)
+        #self._logger.debug(f"Pitch: {pitch:.2f} degrees")
+                
+        # Compensate
+        servo_angle = self.base_angle - pitch  
+
+        # Limit servo movement
+        servo_angle = max(min(servo_angle, 90), 0)
+
+        # Convert angle to duty cycle
+        duty_cycle = 5 + (servo_angle / 90) * 5  
+
+        # self._logger.debug(
+        #     f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
+        # )
+        self.pwm.change_duty_cycle(duty_cycle)
+
+        time.sleep(0.02)  # 20 ms update
+
     def camera_pitch(self):
         """" Run camera pitch correction with servo (without detection) """
         # TODO: Add servo control code
-        # Servo setup
-        pwm = HardwarePWM(0, 50)  # 50 Hz for servo
-        pwm.start(5)            # neutral (0 degrees)
-
-        base_angle = 35  # servo neutral position (camera tilted)
         while True:
             pitch = math.degrees(self.vehicle.attitude.pitch)
             self._logger.debug(f"Pitch: {pitch:.2f} degrees")
-
+                    
             # Compensate
-            servo_angle = base_angle - pitch  
+            servo_angle = self.base_angle - pitch  
 
             # Limit servo movement
             servo_angle = max(min(servo_angle, 90), 0)
@@ -339,7 +360,7 @@ class IMX500Detector:
             self._logger.debug(
                 f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
             )
-            pwm.change_duty_cycle(duty_cycle)
+            self.pwm.change_duty_cycle(duty_cycle)
 
             time.sleep(0.02)  # 20 ms update
 
@@ -382,6 +403,9 @@ class IMX500Detector:
             classes = [i for i in range(len(self.labels))]
 
         while True:
+            # Adjust camera pitch with helper function
+            self._camera_servo()
+
             # Get the latest detections
             self.last_results = self.parse_detections(
                 self.picam2.capture_metadata()
