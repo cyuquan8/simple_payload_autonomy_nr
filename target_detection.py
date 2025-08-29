@@ -2,13 +2,13 @@ import argparse
 import base64
 import cv2
 import json
+import math
 import numpy as np
 import libcamera
 import logging
 import os
 import queue
 import threading
-import time
 import socket
 
 from datetime import datetime
@@ -20,6 +20,7 @@ from picamera2.devices.imx500 import (
     NetworkIntrinsics,
     postprocess_nanodet_detection
 )
+from rpi_hardware_pwm import HardwarePWM
 
 @dataclass
 class Detection:
@@ -117,11 +118,11 @@ class IMX500Detector:
         
         # Initialize camera
         self._picam2 = Picamera2(self._imx500.camera_num)
-        # Camera parameters
-        self.buffer_count = args.buffer_count
         
         # Parameters
 
+        # Camera parameters
+        self.buffer_count = args.buffer_count
         # Connection parameters
         self.rpi_baud_rate = args.rpi_baud_rate
         self.rpi_serial_port = args.rpi_serial_port
@@ -173,6 +174,9 @@ class IMX500Detector:
             )
         else:
             self._vehicle = None
+        # Setup servo
+        self._pwm = HardwarePWM(0, 50)  # 50 Hz for servo
+        # Setup UDP socket
         if args.udp_pub:
             self._sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
@@ -227,35 +231,6 @@ class IMX500Detector:
                     (b_x + b_w, b_y + b_h), 
                     (255, 0, 0, 0)
                 )
-    
-    def _get_vehicle_location(self):
-        """
-        Get current vehicle location if vehicle is connected.
-        
-        Returns:
-            dict or None: Location data with lat/lng or None if no vehicle
-        """
-        if self._vehicle is None:
-            return {
-                'latitude': None,
-                'longitude': None,
-                'altitude': None
-            }
-            
-        try:
-            location = self._vehicle.location.global_frame
-            return {
-                'latitude': location.lat,
-                'longitude': location.lon,
-                'altitude': location.alt
-            }
-        except Exception as e:
-            self._logger.warning(f"Failed to get vehicle location: {e}")
-            return {
-                'latitude': None,
-                'longitude': None,
-                'altitude': None
-            }
     
     def _encode_detection_message(
             self, 
@@ -510,6 +485,53 @@ class IMX500Detector:
         self._message_queue.put(self._sentinel, block=True, timeout=None)
 
     ################################
+    ### Vehicle helper functions ###
+    ################################
+    def _get_vehicle_location(self):
+        """
+        Get current vehicle location if vehicle is connected.
+        
+        Returns:
+            dict or None: Location data with lat/lng or None if no vehicle
+        """
+        if self._vehicle is None:
+            return {
+                'latitude': None,
+                'longitude': None,
+                'altitude': None
+            }
+            
+        try:
+            location = self._vehicle.location.global_frame
+            return {
+                'latitude': location.lat,
+                'longitude': location.lon,
+                'altitude': location.alt
+            }
+        except Exception as e:
+            self._logger.warning(f"Failed to get vehicle location: {e}")
+            return {
+                'latitude': None,
+                'longitude': None,
+                'altitude': None
+            }
+
+    def _get_vehicle_pitch(self):
+        """
+        Get current vehicle pitch if vehicle is connected.
+        
+        Returns:
+            float or None: Pitch or None if no vehicle
+        """
+        if self._vehicle is None:
+            return None
+        try:
+            return self._vehicle.attitude.pitch
+        except Exception as e:
+            self._logger.warning(f"Failed to get vehicle pitch: {e}")
+            return None
+
+    ################################
     ### Thread handler functions ###
     ################################
 
@@ -663,10 +685,27 @@ class IMX500Detector:
         
         while self._camera_pitch_active and not self._shutdown_event.is_set():
             try:
-                # TODO: Implement servo control logic here
-                # For now, just a placeholder that logs periodically
-                self._logger.debug("Camera pitch correction cycle")
-                
+                pitch = self._get_vehicle_pitch()
+                if pitch is None:
+                    self._logger.warning(
+                        "No pitched obtained. Skipping servo correction."
+                    )
+                    continue
+                else:
+                    pitch = math.degrees(pitch))
+                    self._logger.debug(f"Pitch: {pitch:.2f} degrees")
+                        
+                # Compensate
+                servo_angle = self.base_angle - pitch  
+                # Limit servo movement
+                servo_angle = max(min(servo_angle, 90), 0)
+                # Convert angle to duty cycle
+                duty_cycle = 5 + (servo_angle / 90) * 5  
+                self._logger.debug(
+                    f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
+                )
+                self._pwm.change_duty_cycle(duty_cycle)
+                # time.sleep(0.02)  # 20 ms update
             except Exception as e:
                 self._logger.error(f"Camera pitch worker error: {e}")
         
@@ -831,6 +870,9 @@ class IMX500Detector:
             self._imx500.set_auto_aspect_ratio()
             
         self._picam2.pre_callback = self._draw_detections
+
+        self._pwm.start(5) # neutral (0 degrees)
+        self.base_angle = 35  # servo neutral position (camera tilted)
 
         # Start all required threads
         self._start_threads()
