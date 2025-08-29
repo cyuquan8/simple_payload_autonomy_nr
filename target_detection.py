@@ -1,9 +1,13 @@
 import argparse
+import base64
 import cv2
+import json
 import numpy as np
 import libcamera
 import logging
 import os
+import queue
+import threading
 import time
 import socket
 
@@ -21,7 +25,7 @@ from picamera2.devices.imx500 import (
 class Detection:
     category: int
     conf: float
-    box: tuple
+    box: tuple[int, int, int, int]
         
 class IMX500Detector:
     def __init__(self, args: argparse.Namespace):
@@ -32,7 +36,7 @@ class IMX500Detector:
         # Formatter
         formatter = logging.Formatter(
             "%(name)s - %(asctime)s - %(levelname)s - %(message)s",
-            datefmt='%Y-%m-%d %H:%M:%S'
+            datefmt='%Y-%m-%dT%H:%M:%S'
         )
         # Add StreamHandler
         stream_handler = logging.StreamHandler()
@@ -66,7 +70,6 @@ class IMX500Detector:
             model_rpk_name = \
                 "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
         model_path = os.path.join(args.model_dir, model_rpk_name)
-        
         # Get label path
         self.labels = args.labels
         labels_name = ""
@@ -75,111 +78,239 @@ class IMX500Detector:
         labels_path = os.path.join(args.labels_dir, labels_name)
         
         # Initialize IMX500
-        self.imx500 = IMX500(model_path)
-        
+        self._imx500 = IMX500(model_path)
         # Create intrinsics
-        self.intrinsics = self.imx500.network_intrinsics
-        if not self.intrinsics:
+        self._intrinsics = self._imx500.network_intrinsics
+        if not self._intrinsics:
             self._logger.info("No intrinsics provided")
-            self.intrinsics = NetworkIntrinsics()
-            self.intrinsics.task = "object detection"
-        if self.intrinsics.task != "object detection":
+            self._intrinsics = NetworkIntrinsics()
+            self._intrinsics.task = "object detection"
+        if self._intrinsics.task != "object detection":
             raise ValueError(
                 f"Model type {self.model_type} cannot be used for OD"
             )
         # Update intrinsics
         if args.use_default_intrinsics:
-            self.intrinsics.update_with_defaults()
+            self._intrinsics.update_with_defaults()
         else:
-            self.intrinsics.bbox_normalization = args.bbox_normalization
-            self.intrinsics.bbox_order = args.bbox_order
-            self.intrinsics.fps = args.fps
-            self.intrinsics.ignore_dash_labels = args.ignore_dash_labels
-            self.intrinsics.inference_rate = args.inference_rate
+            self._intrinsics.bbox_normalization = args.bbox_normalization
+            self._intrinsics.bbox_order = args.bbox_order
+            self._intrinsics.fps = args.fps
+            self._intrinsics.ignore_dash_labels = args.ignore_dash_labels
+            self._intrinsics.inference_rate = args.inference_rate
             with open(labels_path, "r") as f:
-                self.intrinsics.labels = f.read().splitlines()
-            self.intrinsics.postprocess = args.postprocess
-            self.intrinsics.preserve_aspect_ratio = \
+                self._intrinsics.labels = f.read().splitlines()
+            self._intrinsics.postprocess = args.postprocess
+            self._intrinsics.preserve_aspect_ratio = \
                 args.preserve_aspect_ratio
-            self.intrinsics.softmax = args.softmax
+            self._intrinsics.softmax = args.softmax
+        # Labels used
+        if self._intrinsics.ignore_dash_labels:
+            # Dash removed labels
+            self._dash_rmv_labels = [
+                label for label in self._intrinsics.labels \
+                if label and label != "-"
+            ]
+            self._labels_used = self._dash_rmv_labels
+        else:
+            self._labels_used = self._intrinsics.labels
         
         # Initialize camera
-        self.picam2 = Picamera2(self.imx500.camera_num)
-        
+        self._picam2 = Picamera2(self._imx500.camera_num)
         # Camera parameters
         self.buffer_count = args.buffer_count
         
+        # Parameters
+
+        # Connection parameters
+        self.rpi_baud_rate = args.rpi_baud_rate
+        self.rpi_serial_port = args.rpi_serial_port
+        self.udp_image_quality = args.udp_image_quality
+        self.udp_ip = args.udp_ip
+        self.udp_port = args.udp_port
+        self.udp_pub = args.udp_pub
+        self.udp_queue_block = args.udp_queue_block
+        self.udp_queue_timeout = args.udp_queue_timeout
+        self.udp_queue_maxsize = args.udp_queue_maxsize
+        # Debug parameters
+        self.debug_camera = args.debug_camera
+        self.debug_detect = args.debug_detect
+        self.debug_detect_no_vech = args.debug_detect_no_vech
         # Detection parameters
+        self.detect_classes = args.detect_classes
+        if len(self.detect_classes) == 0:
+            # No interested classes -> All classes
+            self.detect_classes = [i for i in range(len(self._labels_used))]
         self.hflip = args.hflip
         self.iou = args.iou
         self.max_detections = args.max_detections
         self.threshold = args.threshold
         self.vflip = args.vflip
         
-        # Dash removed labels
-        if self.intrinsics.ignore_dash_labels:
-            self.dash_rmv_labels = [
-                label for label in self.intrinsics.labels \
-                if label and label != "-"
-            ]
-
-        # Store detections and corresponding image frame
-        self.last_detections: list[Detection] = []
-        self.last_detections_image = None # TODO: Add typing
-        # Store detections for preview. Safe due to GIL but might be stale
-        self.last_results: list[Detection] = []
+        # Threads
         
-        # Connection parameters
-        self.rpi_baud_rate = args.rpi_baud_rate
-        self.rpi_serial_port = args.rpi_serial_port
-        self.udp_ip = args.udp_ip
-        self.udp_port = args.udp_port
-        self.udp_pub = args.udp_pub
+        # Camera pitch worker thread
+        self._camera_pitch_thread = None
+        self._camera_pitch_active = False
+        # Detection worker thread
+        self._detection_thread = None
+        self._detection_active = False
+        # UDP publishing worker thread 
+        self._message_queue = queue.Queue(maxsize=args.udp_queue_maxsize)
+        self._udp_thread = None
+        self._sentinel = object()  # Unique sentinel object for shutdown
+        # Shutdown event for graceful termination
+        self._shutdown_event = threading.Event()
+        # Start event for synchronized thread startup
+        self._start_event = threading.Event()
         
         # Setup comms
-        if not args.debug_detect:
-            self.vehicle=connect(
+        if not args.debug_detect_no_vech:
+            self._vehicle=connect(
                 self.rpi_serial_port, 
                 wait_ready=True, 
                 baud=self.rpi_baud_rate
             )
+        else:
+            self._vehicle = None
         if args.udp_pub:
-            self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
+        # Store detections with thread safety
+        self._detections_lock = threading.Lock()
+        self._last_detections: list[Detection] = []
+    
+    #########################
+    ### Getters / Setters ###
+    #########################
+
     @property
     def logger(self):
         """ Get logger"""
         return self._logger
     
-    def start(self, show_preview=True):
-        """Start the detector"""
-        config = self.picam2.create_preview_configuration(
-            controls={"FrameRate": self.intrinsics.inference_rate}, 
-            buffer_count=self.buffer_count,
-            transform=libcamera.Transform(
-                hflip=self.hflip, 
-                vflip=self.vflip
-            )
-        )
-        
-        self.imx500.show_network_fw_progress_bar()
-        self.picam2.start(config, show_preview=show_preview)
-        
-        if self.intrinsics.preserve_aspect_ratio:
-            self.imx500.set_auto_aspect_ratio()
-            
-        self.picam2.pre_callback = self.draw_detections
+    ################################
+    ### Private Helper Functions ###
+    ################################
     
-    def parse_detections(self, metadata: dict):
+    def _draw_detections(self, request, stream="main"):
+        """Draw the detections for this request onto the ISP output."""
+        with self._detections_lock:
+            detections_to_draw = self._last_detections.copy()
+        if not detections_to_draw:
+            return
+            
+        with MappedArray(request, stream) as m:
+            # Draw all detections using the shared helper function
+            for detection in detections_to_draw:
+                self._draw_single_detection(
+                    detection, 
+                    m.array, 
+                    self._labels_used
+                )
+            # Draw ROI if preserve aspect ratio is enabled
+            if self._intrinsics.preserve_aspect_ratio:
+                b_x, b_y, b_w, b_h = self._imx500.get_roi_scaled(request)
+                color = (255, 0, 0) # red
+                cv2.putText(
+                    m.array, 
+                    "ROI", 
+                    (b_x + 5, b_y + 15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, 
+                    color,
+                    1
+                )
+                cv2.rectangle(
+                    m.array, 
+                    (b_x, b_y), 
+                    (b_x + b_w, b_y + b_h), 
+                    (255, 0, 0, 0)
+                )
+    
+    def _get_vehicle_location(self):
         """
-        Parse the output tensor into a number of detected objects, 
-        scaled to the ISP output.
+        Get current vehicle location if vehicle is connected.
+        
+        Returns:
+            dict or None: Location data with lat/lng or None if no vehicle
         """
-        np_outputs = self.imx500.get_outputs(metadata, add_batch=True)
-        input_w, input_h = self.imx500.get_input_size()
+        if self._vehicle is None:
+            return {
+                'latitude': None,
+                'longitude': None,
+                'altitude': None
+            }
+            
+        try:
+            location = self._vehicle.location.global_frame
+            return {
+                'latitude': location.lat,
+                'longitude': location.lon,
+                'altitude': location.alt
+            }
+        except Exception as e:
+            self._logger.warning(f"Failed to get vehicle location: {e}")
+            return {
+                'latitude': None,
+                'longitude': None,
+                'altitude': None
+            }
+    
+    def _encode_detection_message(
+            self, 
+            detections: list[Detection], 
+            image: np.ndarray,
+            location: dict | None = None
+        ) -> bytes:
+        """
+        Encode detections and image into bytes for UDP transmission.
+        """
+        # Encode image to JPEG bytes with configurable quality
+        _, img_encoded = cv2.imencode(
+            '.jpg', 
+            image, 
+            [cv2.IMWRITE_JPEG_QUALITY, self.udp_image_quality]
+        )
+        img_base64 = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
+        
+        # Convert detections to serializable format
+        detection_data = []
+        
+        for d in detections:
+            detection_data.append({
+                'box': d.box, # tuple -> JSON array automatically
+                'category': d.category, # int
+                'confidence': d.conf, # float
+                'label': self._labels_used[d.category], # str
+            })
+        
+        # Create message payload
+        message = {
+            'detections': detection_data,
+            'image': img_base64,
+            'location': location,
+            'timestamp': datetime.now().isoformat(),
+        }
+        
+        # Convert to JSON and encode as bytes
+        return json.dumps(message).encode('utf-8')
+    
+    def _parse_detections(self, request):
+        """
+        Parse the output tensor into a number of detected objects, scaled to the
+        ISP output.
+        
+        Args:
+            request: Picamera2 request object with both metadata and image data
+        """
+        metadata = request.get_metadata()
+        np_outputs = self._imx500.get_outputs(metadata, add_batch=True)
         if np_outputs is None:
-            return self.last_detections
-        if self.intrinsics.postprocess == "nanodet":
+            return [], None
+        input_w, input_h = self._imx500.get_input_size()
+        
+        if self._intrinsics.postprocess == "nanodet":
             boxes, scores, classes = \
                 postprocess_nanodet_detection(
                     outputs=np_outputs[0], 
@@ -204,186 +335,510 @@ class IMX500Detector:
             boxes = np_outputs[0][0]
             scores = np_outputs[1][0]
             classes = np_outputs[2][0]
-            if self.intrinsics.bbox_normalization:
+            if self._intrinsics.bbox_normalization:
                 # Assumes input_h == input_w
                 boxes = boxes / input_h
 
-            if self.intrinsics.bbox_order == "xy":
+            if self._intrinsics.bbox_order == "xy":
                 boxes = boxes[:, [1, 0, 3, 2]]
             boxes = np.array_split(boxes, 4, axis=1)
             boxes = zip(*boxes)
         
-        self.last_detections = [
+        new_detections = [
             Detection(
                 int(category),
                 score,
-                self.imx500.convert_inference_coords(
+                self._imx500.convert_inference_coords(
                     box, 
                     metadata,
-                    self.picam2
+                    self._picam2
                 )
             )
             for box, score, category in zip(boxes, scores, classes)
             if score > self.threshold
         ]
-        return self.last_detections
-
-    def draw_detections(self, request, stream="main"):
-        """Draw the detections for this request onto the ISP output."""
-        if self.last_results is None:
-            return
-        if self.intrinsics.ignore_dash_labels:
-            labels = self.dash_rmv_labels
-        else:
-            labels = self.intrinsics.labels
-            
-        with MappedArray(request, stream) as m:
-            for d in self.last_results:
-                x, y, w, h = d.box
-                label = f"{labels[d.category]} ({d.conf:.2f})"
-
-                # Calculate text size and position
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    label, 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.5, 
-                    1
-                )
-                text_x = x + 5
-                text_y = y + 15
-
-                # Create a copy of array to draw background with opacity
-                overlay = m.array.copy()
-
-                # Draw the background rectangle on the overlay
-                cv2.rectangle(
-                    overlay,
-                    (text_x, text_y - text_height),
-                    (text_x + text_width, text_y + baseline),
-                    (255, 255, 255), # White background color
-                    cv2.FILLED
-                )
-
-                alpha = 0.30
-                cv2.addWeighted(
-                    overlay, 
-                    alpha, 
-                    m.array, 
-                    1 - alpha, 
-                    0, 
-                    m.array
-                )
-
-                # Draw text on top of the background
-                cv2.putText(
-                    m.array, 
-                    label, 
-                    (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.5, 
-                    (0, 0, 255), 
-                    1
-                )
-
-                # Draw detection box
-                cv2.rectangle(
-                    m.array, 
-                    (x, y), 
-                    (x + w, y + h), 
-                    (0, 255, 0, 0), 
-                    thickness=2
-                )
-
-            if self.intrinsics.preserve_aspect_ratio:
-                b_x, b_y, b_w, b_h = self.imx500.get_roi_scaled(request)
-                color = (255, 0, 0) # red
-                cv2.putText(
-                    m.array, 
-                    "ROI", 
-                    (b_x + 5, b_y + 15), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.5, 
-                    color,
-                    1
-                )
-                cv2.rectangle(
-                    m.array, 
-                    (b_x, b_y), 
-                    (b_x + b_w, b_y + b_h), 
-                    (255, 0, 0, 0)
-                )
-    
-    def camera_pitch(self):
-        """" Run camera pitch correction with servo (without detection) """
-        # TODO: Add servo control code
-
-    def detect(self, classes: list[int]):
-        """ 
-        Run detection only (without camera pitch correction using servo) 
-        NOTE: Does not connect to vehicle using dronekit
-        """
-        # No interested classes -> All classes
-        if len(classes) == 0:
-            classes = [i for i in range(len(self.labels))]
-
-        while True:
-            # Get the latest detections
-            self.last_results = self.parse_detections(
-                self.picam2.capture_metadata()
-            )
-
-            for detection in self.last_results:
-                d_cls = detection.category
-                conf = detection.conf
-                # Print when a target is detected with high confidence
-                if d_cls in classes:
-                    msg=(
-                        f"{datetime.now()}: {self.intrinsics.labels[d_cls]} "
-                        f"detected with {conf:.2f} confidence"
-                    )
-                    self._logger.debug(msg)
-                    if self.udp_pub:
-                        msg_data=msg.encode('utf-8')
-                        self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
-
-            # Small delay to prevent overwhelming the system
-            time.sleep(0.1)
-    
-    def camera_pitch_detect(self, classes: list[int]):
-        """ Run camera pitch correction detection """
-        # No interested classes -> All classes
-        if len(classes) == 0:
-            classes = [i for i in range(len(self.labels))]
-
-        while True:
-            # Get the latest detections
-            self.last_results = self.parse_detections(
-                self.picam2.capture_metadata()
-            )
-
-            for detection in self.last_results:
-                d_cls = detection.category
-                conf = detection.conf
         
-                # Print when a target is detected with high confidence
-                if d_cls in classes:
-                    loc=self.vehicle.location.global_frame
+        return new_detections, request.make_array("main")
 
-                    # Message
-                    msg=(
-                        f"{datetime.now()}: {self.intrinsics.labels[d_cls]} "
-                        f"detected @ {loc} with {conf:.2f} confidence"
+    ################################
+    ### Drawing helper functions ###
+    ################################
+
+    def _draw_detections_on_image(
+            self,
+            detections: list[Detection],
+            image: np.ndarray,
+        ) -> np.ndarray:
+        """
+        Helper function to draw detection bounding boxes and labels on an image.
+        Returns a copy of the image with detections drawn.
+        """
+        if not detections:
+            return image
+        
+        # Create a copy to draw on
+        result_image = image.copy()
+        
+        # Draw all detections using the helper
+        for detection in detections:
+            self._draw_single_detection(
+                detection, 
+                result_image, 
+                self._labels_used
+            )
+
+        return result_image
+
+    def _draw_single_detection(
+            self, 
+            detection: Detection, 
+            image: np.ndarray, 
+            labels: list[str]
+        ) -> None:
+        """
+        Helper function to draw a single detection box and label on an image.
+        Modifies the image in-place.
+        """
+        x, y, w, h = detection.box
+        label = f"{labels[detection.category]} ({detection.conf:.2f})"
+
+        # Calculate text size and position
+        (text_width, text_height), baseline = cv2.getTextSize(
+            label, 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.5, 
+            1
+        )
+        text_x = x + 5
+        text_y = y + 15
+
+        # Create overlay for semi-transparent background
+        overlay = image.copy()
+
+        # Draw the background rectangle on the overlay
+        cv2.rectangle(
+            overlay,
+            (text_x, text_y - text_height),
+            (text_x + text_width, text_y + baseline),
+            (255, 255, 255), # White background color
+            cv2.FILLED
+        )
+
+        alpha = 0.30
+        cv2.addWeighted(
+            overlay, 
+            alpha, 
+            image, 
+            1 - alpha, 
+            0, 
+            image
+        )
+
+        # Draw text on top of the background
+        cv2.putText(
+            image, 
+            label, 
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.5, 
+            (0, 0, 255), 
+            1
+        )
+
+        # Draw detection box
+        cv2.rectangle(
+            image, 
+            (x, y), 
+            (x + w, y + h), 
+            (0, 255, 0, 0), 
+            thickness=2
+        )
+
+    ######################################
+    ### Message queue helper functions ###
+    ######################################
+
+    def _dequeue_message(self):
+        """
+        Helper function to dequeue a message with proper error handling.
+        
+        Returns:
+            Message from queue or None if error/timeout
+        """
+        try:
+            message = self._message_queue.get(
+                block=self.udp_queue_block, 
+                timeout=self.udp_queue_timeout
+            )
+            self._logger.debug("Dequeued message from UDP queue")
+            return message
+        except queue.Empty:
+            self._logger.warning(
+                "No message available in UDP queue (timeout/empty)"
+            )
+            return None
+        except Exception as e:
+            self._logger.error(f"Failed to dequeue message: {e}")
+            return None
+
+    def _enqueue_message(self, message):
+        """
+        Helper function to enqueue a message with proper error handling.
+        
+        Args:
+            message: Message to enqueue
+        """
+        try:
+            self._message_queue.put(
+                message, 
+                block=self.udp_queue_block, 
+                timeout=self.udp_queue_timeout
+            )
+            self._logger.debug("Queued detection message for UDP publishing")
+        except queue.Full:
+            self._logger.warning(
+                "Message queue is full, dropping detection message"
+            )
+        except Exception as e:
+            self._logger.error(f"Failed to queue detection message: {e}")
+    
+    def _enqueue_sentinel(self):
+        """
+        Enqueue the sentinel object to signal shutdown to UDP worker thread.
+        """
+        # Always block indefinitely for sentinel to ensure shutdown happens
+        self._message_queue.put(self._sentinel, block=True, timeout=None)
+
+    ################################
+    ### Thread handler functions ###
+    ################################
+
+    def _start_camera_pitch_worker(self):
+        """
+        Start the camera pitch worker thread.
+        """
+        if self._camera_pitch_thread is not None:
+            raise RuntimeError("Camera pitch worker already started")
+        
+        self._camera_pitch_active = True
+        self._camera_pitch_thread = threading.Thread(
+            target=self._camera_pitch_worker,
+            daemon=True,
+            name="Camera-Pitch-Worker"
+        )
+        self._camera_pitch_thread.start()
+        self._logger.info("Started camera pitch worker thread")
+
+    def _stop_camera_pitch_worker(self):
+        """
+        Stop the camera pitch worker thread gracefully.
+        """
+        if self._camera_pitch_thread is not None:
+            self._logger.info("Stopping camera pitch worker...")
+            self._camera_pitch_active = False
+            self._camera_pitch_thread.join(timeout=5.0)
+            if self._camera_pitch_thread.is_alive():
+                self._logger.warning(
+                    "Camera pitch worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Camera pitch worker thread stopped")
+            self._camera_pitch_thread = None
+
+    def _start_detection_worker(self):
+        """
+        Start the detection worker thread.
+        """
+        if self._detection_thread is not None:
+            raise RuntimeError("Detection worker already started")
+        
+        self._detection_active = True
+        self._detection_thread = threading.Thread(
+            target=self._detection_worker,
+            daemon=True,
+            name="Detection-Worker"
+        )
+        self._detection_thread.start()
+        self._logger.info("Started detection worker thread")
+
+    def _stop_detection_worker(self):
+        """
+        Stop the detection worker thread gracefully.
+        """
+        if self._detection_thread is not None:
+            self._logger.info("Stopping detection worker...")
+            self._detection_active = False
+            self._detection_thread.join(timeout=5.0)
+            if self._detection_thread.is_alive():
+                self._logger.warning(
+                    "Detection worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Detection worker thread stopped")
+            self._detection_thread = None
+
+    def _start_udp_publisher(self):
+        """
+        Start the UDP publisher thread.
+        """
+        if self._udp_thread is not None:
+            raise RuntimeError("UDP publisher already started")
+        
+        self._udp_thread = threading.Thread(
+            target=self._udp_publisher_worker,
+            daemon=True,
+            name="UDP-Publisher"
+        )
+        self._udp_thread.start()
+        self._logger.info("Started UDP publisher thread")
+    
+    def _stop_udp_publisher(self):
+        """
+        Stop the UDP publisher thread gracefully.
+        """
+        if self._udp_thread is not None:
+            self._logger.info("Stopping UDP publisher...")
+            self._enqueue_sentinel()
+            self._udp_thread.join(timeout=5.0)
+            if self._udp_thread.is_alive():
+                self._logger.warning(
+                    "UDP publisher thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("UDP publisher thread stopped")
+            self._udp_thread = None
+    
+    def _start_threads(self):
+        """
+        Start all required threads based on operation mode.
+        """
+        self._logger.info("Starting threads...")
+        
+        if self.debug_camera:
+            self._start_camera_pitch_worker()
+        elif self.debug_detect or self.debug_detect_no_vech:
+            self._start_detection_worker()
+        else:
+            self._start_camera_pitch_worker()
+            self._start_detection_worker()
+        
+        if self.udp_pub:
+            self._start_udp_publisher()
+        
+        self._logger.info("All threads started successfully")
+
+    def _stop_threads(self):
+        """
+        Stop all running threads gracefully.
+        """
+        self._logger.info("Stopping threads...")
+        
+        # Stop camera pitch worker if running
+        if self._camera_pitch_thread is not None:
+            self._stop_camera_pitch_worker()
+        
+        # Stop detection worker if running
+        if self._detection_thread is not None:
+            self._stop_detection_worker()
+        
+        # Stop UDP publisher if running
+        if self._udp_thread is not None:
+            self._stop_udp_publisher()
+        
+        self._logger.info("All threads stopped")
+
+    ###############################
+    ### Thread worker functions ###
+    ###############################
+
+    def _camera_pitch_worker(self):
+        """
+        Worker thread function that handles camera pitch correction with servo.
+        """
+        self._logger.info("Camera pitch worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Camera pitch worker ready to begin processing")
+        
+        while self._camera_pitch_active and not self._shutdown_event.is_set():
+            try:
+                # TODO: Implement servo control logic here
+                # For now, just a placeholder that logs periodically
+                self._logger.debug("Camera pitch correction cycle")
+                
+            except Exception as e:
+                self._logger.error(f"Camera pitch worker error: {e}")
+        
+        self._logger.info("Camera pitch worker stopped")
+
+    def _detection_worker(self):
+        """
+        Worker thread function that continuously runs detection processing.
+        """
+        self._logger.info("Detection worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Detection worker ready to begin processing")
+        
+        while self._detection_active and not self._shutdown_event.is_set():
+            try:
+                # Get the latest detections with synchronized image capture
+                request = self._picam2.capture_request()
+                current_detections, current_image = \
+                    self._parse_detections(request)
+                request.release()  # Always release the request
+
+                # Store detections safely for preview drawing
+                if current_detections and current_image:
+                    with self._detections_lock:
+                        self._last_detections = current_detections
+                else:
+                    continue
+                    
+                # Get vehicle location for relevant detections
+                vehicle_location = self._get_vehicle_location()
+                
+                # Filter relevant detections
+                relevant_detections = []
+                for d in current_detections:
+                    if d.category in self.detect_classes:
+                        relevant_detections.append(d)
+                        # Create debug message with fixed format location
+                        lat = vehicle_location['latitude']
+                        lng = vehicle_location['longitude'] 
+                        alt = vehicle_location['altitude']
+                        msg = (
+                            f"{datetime.now().isoformat()}: "
+                            f"{self._intrinsics.labels[d.category]} "
+                            f"detected with {d.conf:.2f} confidence "
+                            f"at lat:{lat}, lng:{lng}, alt:{alt}"
+                        )
+                        self._logger.debug(msg)
+                
+                # Send to message queue for UDP publishing if enabled
+                if self.udp_pub and relevant_detections and current_image:
+                    # Draw detections on captured image
+                    annotated_image = self._draw_detections_on_image(
+                        relevant_detections,
+                        current_image
                     )
-                    self._logger.debug(msg)
+                    # Encode message with detections, image, and location
+                    message_bytes = self._encode_detection_message(
+                        relevant_detections, 
+                        annotated_image,
+                        vehicle_location
+                    )
+                    # Add to message queue based on blocking configuration
+                    self._enqueue_message(message_bytes)
+            except Exception as e:
+                self._logger.error(f"Detection worker error: {e}")
+        
+        self._logger.info("Detection worker stopped")
 
-                    if self.udp_pub:
-                        msg_data=msg.encode('utf-8')
-                        # TODO: Encode detection image to bytes and pub
-                        self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
+    def _udp_publisher_worker(self):
+        """
+        Worker thread function to process message queue and send UDP messages.
+        """
+        self._logger.info("UDP publisher worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("UDP publisher worker ready to begin processing")
+        
+        q = self._message_queue
+        has_task_done = hasattr(q, 'task_done') # Compatiblity with other queues
+        
+        while True:
+            # Get message from queue based on blocking configuration
+            message = self._dequeue_message()
+            
+            # Handle case where no message was retrieved
+            if message is None:
+                continue
+            # Check for sentinel (shutdown signal)
+            if message is self._sentinel:
+                if has_task_done:
+                    q.task_done()
+                self._logger.info(
+                    "UDP publisher worker received shutdown signal"
+                )
+                break
+            
+            # Process regular message - send via UDP
+            try:
+                self._sock.sendto(message, (self.udp_ip, self.udp_port))
+                self._logger.debug(
+                    f"Sent UDP message ({len(message)} bytes)"
+                )
+            except Exception as e:
+                self._logger.error(f"Failed to send UDP message: {e}")
+            
+            # Mark task as done
+            if has_task_done:
+                q.task_done()
+        
+        self._logger.info("UDP publisher worker stopped")
+
+    #########################
+    ### Exposed functions ###
+    #########################
     
-            # Small delay to prevent overwhelming the system
-            time.sleep(0.1)
+    def cleanup(self):
+        """
+        Cleanup resources and stop background threads.
+        """
+        self._logger.info("Cleaning up detector resources...")
+        self._shutdown_event.set()
+        self._stop_threads()
+        self._start_event.clear()
+        self._shutdown_event.clear()
+        self._logger.info("Detector cleanup complete")
     
+    def run(self):
+        """
+        Run the detector in the appropriate mode based on debug settings.
+        This method blocks until interrupted.
+        """
+        if self.debug_camera:
+            self._logger.info("Running in camera-control-only mode")
+        elif self.debug_detect:
+            self._logger.info("Running in detection-only mode with vehicle")
+        elif self.debug_detect_no_vech:
+            self._logger.info("Running in detection-only mode without vehicle")
+        else:
+            self._logger.info("Running in default mode")
+        
+        # Wait for shutdown event while worker threads process in background
+        self._shutdown_event.wait()
+
+    def start(self, show_preview=True):
+        """Start the detector"""
+        config = self._picam2.create_preview_configuration(
+            controls={"FrameRate": self._intrinsics.inference_rate}, 
+            buffer_count=self.buffer_count,
+            transform=libcamera.Transform(
+                hflip=self.hflip, 
+                vflip=self.vflip
+            )
+        )
+        
+        self._imx500.show_network_fw_progress_bar()
+        self._picam2.start(config, show_preview=show_preview)
+        
+        if self._intrinsics.preserve_aspect_ratio:
+            self._imx500.set_auto_aspect_ratio()
+            
+        self._picam2.pre_callback = self._draw_detections
+
+        # Start all required threads
+        self._start_threads()
+        
+        # Signal all threads to begin processing
+        self._logger.info("Signaling threads to begin processing")
+        self._start_event.set()
+
 def get_args():
     parser = argparse.ArgumentParser()
     
@@ -400,13 +855,19 @@ def get_args():
         "--debug-camera",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Debugging mode. Runs camera_pitch()"
+        help="Runs camera pitch control only with vehicle connection"
     )
     parser.add_argument(
         "--debug-detect",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Debugging mode. Runs detect()"
+        help="Runs detection with vehicle connection for location"
+    )
+    parser.add_argument(
+        "--debug-detect-no-vech",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs detection without vehicle connection (no location)"
     )
     parser.add_argument(
         "--show-preview",
@@ -577,6 +1038,15 @@ def get_args():
         type=str
     )
     parser.add_argument(
+        "--udp-image-quality",
+        default=85,
+        help=(
+            "JPEG quality for UDP image transmission" 
+            "(1-100, higher = better quality but larger size)"
+        ),
+        type=int
+    )
+    parser.add_argument(
         "--udp-ip",
         default="192.168.0.109",
         help="UDP IP Address",
@@ -594,23 +1064,46 @@ def get_args():
         default=True,
         help="Whether to pub results",
     )
+    parser.add_argument(
+        "--udp-queue-block",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether UDP queue operations should block when full/empty"
+    )
+    parser.add_argument(
+        "--udp-queue-maxsize",
+        default=0,
+        help=(
+            "Maximum size of UDP message queue "
+            "(0 = unlimited, higher values may use more memory)"
+        ),
+        type=int
+    )
+    parser.add_argument(
+        "--udp-queue-timeout",
+        default=None,
+        help=(
+            "Timeout in seconds for UDP message queue operations "
+            "(None = no timeout, only used when blocking is enabled)"
+        ),
+        type=lambda x: None if x.lower() == 'none' else float(x)
+    )
     
     return parser.parse_args()
 
 def main():
+    args = get_args()
+    detector = IMX500Detector(args)
     
     try:
-        args = get_args()
-        detector = IMX500Detector(args)
         detector.start(show_preview=args.show_preview)
-        if args.debug_camera:
-            detector.camera_pitch()
-        elif args.debug_detect:
-            detector.detect(args.detect_classes)
-        else:
-            detector.camera_pitch_detect(args.detect_classes)
-    except KeyboardInterrupt as e:
-        logging.error(f"{e}")
+        detector.run()
+    except KeyboardInterrupt:
+        detector.logger.info("Received keyboard interrupt, shutting down...")
+    except Exception as e:
+        detector.logger.error(f"Application error: {e}")
+    finally:
+        detector.cleanup()
 
 if __name__ == "__main__":
     
