@@ -137,6 +137,7 @@ class IMX500Detector:
         self.debug_camera = args.debug_camera
         self.debug_detect = args.debug_detect
         self.debug_detect_no_vech = args.debug_detect_no_vech
+        self.debug_goto_waypoints = args.debug_goto_waypoints
         # Detection parameters
         self.detect_classes = args.detect_classes
         if len(self.detect_classes) == 0:
@@ -156,6 +157,9 @@ class IMX500Detector:
         # Detection worker thread
         self._detection_thread = None
         self._detection_active = False
+        # Goto waypoints thread
+        self._goto_waypoints_thread = None
+        self._goto_waypoints_active = False
         # UDP publishing worker thread 
         self._message_queue = queue.Queue(maxsize=args.udp_queue_maxsize)
         self._udp_thread = None
@@ -599,6 +603,38 @@ class IMX500Detector:
                 self._logger.info("Detection worker thread stopped")
             self._detection_thread = None
 
+    def _start_goto_waypoints_worker(self):
+        """
+        Start the goto waypoints thread
+        """
+        if self._goto_waypoints_thread is not None:
+            raise RuntimeError("Goto waypoints worker already started")
+        
+        self._goto_waypoints_active = True
+        self._goto_waypoints_thread = threading.Thread(
+            target=self._goto_waypoints_worker,
+            daemon=True,
+            name="Goto-Waypoints-Worker"
+        )
+        self._goto_waypoints_thread.start()
+        self._logger.info("Started goto waypoints worker thread")
+
+    def _stop_goto_waypoints_worker(self):
+        """
+        Stop the goto waypoints worker thread gracefully.
+        """
+        if self._goto_waypoints_thread is not None:
+            self._logger.info("Stopping goto waypoints worker...")
+            self._goto_waypoints_active = False
+            self._goto_waypoints_thread.join(timeout=5.0)
+            if self._goto_waypoints_thread.is_alive():
+                self._logger.warning(
+                    "Goto waypoints worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Goto waypoints worker thread stopped")
+            self._goto_waypoints_thread = None
+
     def _start_udp_publisher(self):
         """
         Start the UDP publisher thread.
@@ -640,9 +676,12 @@ class IMX500Detector:
             self._start_camera_pitch_worker()
         elif self.debug_detect or self.debug_detect_no_vech:
             self._start_detection_worker()
+        elif self.debug_goto_waypoints:
+            self._start_goto_waypoints_worker()
         else:
             self._start_camera_pitch_worker()
             self._start_detection_worker()
+            self._start_goto_waypoints_worker()
         
         if self.udp_pub:
             self._start_udp_publisher()
@@ -663,6 +702,10 @@ class IMX500Detector:
         if self._detection_thread is not None:
             self._stop_detection_worker()
         
+        # Stop goto waypoints worker if running
+        if self._goto_waypoints_thread is not None:
+            self._stop_goto_waypoints_worker()
+
         # Stop UDP publisher if running
         if self._udp_thread is not None:
             self._stop_udp_publisher()
@@ -692,7 +735,7 @@ class IMX500Detector:
                     )
                     continue
                 else:
-                    pitch = math.degrees(pitch))
+                    pitch = math.degrees(pitch)
                     self._logger.debug(f"Pitch: {pitch:.2f} degrees")
                         
                 # Compensate
@@ -776,6 +819,20 @@ class IMX500Detector:
         
         self._logger.info("Detection worker stopped")
 
+    def _goto_waypoints_worker(self):
+        """
+        Worker thread function to make vehicle go to a series of waypoints
+        """
+        self._logger.info("Goto waypoints worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Goto waypoints worker ready to begin processing")
+
+        # TODO: Implement go to waypoint logic
+
+        self._logger.info("Goto waypoints worker stopped")
+
     def _udp_publisher_worker(self):
         """
         Worker thread function to process message queue and send UDP messages.
@@ -846,6 +903,8 @@ class IMX500Detector:
             self._logger.info("Running in detection-only mode with vehicle")
         elif self.debug_detect_no_vech:
             self._logger.info("Running in detection-only mode without vehicle")
+        elif self.debug_goto_waypoints:
+            self._logger.info("Running in goto-waypoints-only mode")
         else:
             self._logger.info("Running in default mode")
         
@@ -903,13 +962,19 @@ def get_args():
         "--debug-detect",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Runs detection with vehicle connection for location"
+        help="Runs detection only with vehicle connection for location"
     )
     parser.add_argument(
         "--debug-detect-no-vech",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Runs detection without vehicle connection (no location)"
+        help="Runs detection only without vehicle connection (no location)"
+    )
+    parser.add_argument(
+        "--debug-goto-waypoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs go to waypoints only with vehicle connection"
     )
     parser.add_argument(
         "--show-preview",
