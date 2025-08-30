@@ -8,6 +8,7 @@ import libcamera
 import logging
 import os
 import queue
+import time
 import threading
 import socket
 
@@ -179,7 +180,7 @@ class IMX500Detector:
         else:
             self._vehicle = None
         # Setup servo
-        self._pwm = HardwarePWM(0, 50)  # 50 Hz for servo
+        self._pwm = HardwarePWM(0, 50) # 50 Hz for servo
         # Setup UDP socket
         if args.udp_pub:
             self._sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -731,7 +732,7 @@ class IMX500Detector:
                 pitch = self._get_vehicle_pitch()
                 if pitch is None:
                     self._logger.warning(
-                        "No pitched obtained. Skipping servo correction."
+                        "No pitch obtained. Skipping servo correction."
                     )
                     continue
                 else:
@@ -748,7 +749,7 @@ class IMX500Detector:
                     f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
                 )
                 self._pwm.change_duty_cycle(duty_cycle)
-                # time.sleep(0.02)  # 20 ms update
+                time.sleep(0.02) # 20 ms update
             except Exception as e:
                 self._logger.error(f"Camera pitch worker error: {e}")
         
@@ -814,8 +815,12 @@ class IMX500Detector:
                     )
                     # Add to message queue based on blocking configuration
                     self._enqueue_message(message_bytes)
+                
+                # Small delay to prevent overwhelming the system
+                time.sleep(0.1)  # 10Hz detection rate
             except Exception as e:
                 self._logger.error(f"Detection worker error: {e}")
+                time.sleep(0.1)  # Brief pause on error
         
         self._logger.info("Detection worker stopped")
 
