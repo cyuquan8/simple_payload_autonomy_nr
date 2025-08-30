@@ -29,7 +29,7 @@ class Detection:
     conf: float
     box: tuple[int, int, int, int]
         
-class IMX500Detector:
+class SimplePayloadDrone:
     def __init__(self, args: argparse.Namespace):
         
         # Logger
@@ -897,18 +897,18 @@ class IMX500Detector:
     
     def cleanup(self):
         """
-        Cleanup resources and stop background threads.
+        Cleanup drone resources and stop background threads.
         """
-        self._logger.info("Cleaning up detector resources...")
+        self._logger.info("Cleaning up drone resources...")
         self._shutdown_event.set()
         self._stop_threads()
         self._start_event.clear()
         self._shutdown_event.clear()
-        self._logger.info("Detector cleanup complete")
+        self._logger.info("Drone cleanup complete")
     
     def run(self):
         """
-        Run the detector in the appropriate mode based on debug settings.
+        Run the drone in the appropriate mode based on debug settings.
         This method blocks until interrupted.
         """
         if self.debug_camera:
@@ -926,7 +926,7 @@ class IMX500Detector:
         self._shutdown_event.wait()
 
     def start(self, show_preview=True):
-        """Start the detector"""
+        """Start the drone system"""
         config = self._picam2.create_preview_configuration(
             controls={"FrameRate": self._intrinsics.inference_rate}, 
             buffer_count=self.buffer_count,
@@ -1214,17 +1214,17 @@ def get_args():
 
 def main():
     args = get_args()
-    detector = IMX500Detector(args)
+    drone = SimplePayloadDrone(args)
     
     try:
-        detector.start(show_preview=args.show_preview)
-        detector.run()
+        drone.start(show_preview=args.show_preview)
+        drone.run()
     except KeyboardInterrupt:
-        detector.logger.info("Received keyboard interrupt, shutting down...")
+        drone.logger.info("Received keyboard interrupt, shutting down...")
     except Exception as e:
-        detector.logger.error(f"Application error: {e}")
+        drone.logger.error(f"Application error: {e}")
     finally:
-        detector.cleanup()
+        drone.cleanup()
 
 if __name__ == "__main__":
     
