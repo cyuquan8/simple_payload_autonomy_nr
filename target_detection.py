@@ -198,44 +198,9 @@ class IMX500Detector:
         """ Get logger"""
         return self._logger
     
-    ################################
-    ### Private Helper Functions ###
-    ################################
-    
-    def _draw_detections(self, request, stream="main"):
-        """Draw the detections for this request onto the ISP output."""
-        with self._detections_lock:
-            detections_to_draw = self._last_detections.copy()
-        if not detections_to_draw:
-            return
-            
-        with MappedArray(request, stream) as m:
-            # Draw all detections using the shared helper function
-            for detection in detections_to_draw:
-                self._draw_single_detection(
-                    detection, 
-                    m.array, 
-                    self._labels_used
-                )
-            # Draw ROI if preserve aspect ratio is enabled
-            if self._intrinsics.preserve_aspect_ratio:
-                b_x, b_y, b_w, b_h = self._imx500.get_roi_scaled(request)
-                color = (255, 0, 0) # red
-                cv2.putText(
-                    m.array, 
-                    "ROI", 
-                    (b_x + 5, b_y + 15), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.5, 
-                    color,
-                    1
-                )
-                cv2.rectangle(
-                    m.array, 
-                    (b_x, b_y), 
-                    (b_x + b_w, b_y + b_h), 
-                    (255, 0, 0, 0)
-                )
+    ##################################
+    ### Detection Helper Functions ###
+    ##################################
     
     def _encode_detection_message(
             self, 
@@ -344,6 +309,41 @@ class IMX500Detector:
     ### Drawing helper functions ###
     ################################
 
+    def _draw_detections(self, request, stream="main"):
+        """Draw the detections for this request onto the ISP output."""
+        with self._detections_lock:
+            detections_to_draw = self._last_detections.copy()
+        if not detections_to_draw:
+            return
+            
+        with MappedArray(request, stream) as m:
+            # Draw all detections using the shared helper function
+            for detection in detections_to_draw:
+                self._draw_single_detection(
+                    detection, 
+                    m.array, 
+                    self._labels_used
+                )
+            # Draw ROI if preserve aspect ratio is enabled
+            if self._intrinsics.preserve_aspect_ratio:
+                b_x, b_y, b_w, b_h = self._imx500.get_roi_scaled(request)
+                color = (255, 0, 0) # red
+                cv2.putText(
+                    m.array, 
+                    "ROI", 
+                    (b_x + 5, b_y + 15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, 
+                    color,
+                    1
+                )
+                cv2.rectangle(
+                    m.array, 
+                    (b_x, b_y), 
+                    (b_x + b_w, b_y + b_h), 
+                    (255, 0, 0, 0)
+                )
+
     def _draw_detections_on_image(
             self,
             detections: list[Detection],
@@ -434,6 +434,27 @@ class IMX500Detector:
             thickness=2
         )
 
+    #######################################
+    ### Goto waypoints helper functions ###
+    #######################################
+
+    @staticmethod
+    def _get_distance_metres(aLocation1, aLocation2):
+        """
+        Return the ground distance in metres between two LocationGlobal objects.
+
+        This method is an approximation, and will not be accurate over large 
+        distances and close to the earth's poles. It comes from the ArduPilot 
+        test code.
+        """
+        dlat = aLocation2.lat - aLocation1.lat
+        dlong = aLocation2.lon - aLocation1.lon
+        return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
+    
+    def _goto_waypoint(self):
+        # TODO
+        pass
+
     ######################################
     ### Message queue helper functions ###
     ######################################
@@ -501,25 +522,17 @@ class IMX500Detector:
         """
         if self._vehicle is None:
             return {
-                'latitude': None,
-                'longitude': None,
-                'altitude': None
+                'lat': None,
+                'lon': None,
+                'alt': None
             }
             
-        try:
-            location = self._vehicle.location.global_frame
-            return {
-                'latitude': location.lat,
-                'longitude': location.lon,
-                'altitude': location.alt
-            }
-        except Exception as e:
-            self._logger.warning(f"Failed to get vehicle location: {e}")
-            return {
-                'latitude': None,
-                'longitude': None,
-                'altitude': None
-            }
+        location = self._vehicle.location.global_frame
+        return {
+            'lat': location.lat,
+            'lon': location.lon,
+            'alt': location.alt
+        }
 
     def _get_vehicle_pitch(self):
         """
@@ -530,11 +543,7 @@ class IMX500Detector:
         """
         if self._vehicle is None:
             return None
-        try:
-            return self._vehicle.attitude.pitch
-        except Exception as e:
-            self._logger.warning(f"Failed to get vehicle pitch: {e}")
-            return None
+        return self._vehicle.attitude.pitch
 
     ################################
     ### Thread handler functions ###
@@ -789,9 +798,9 @@ class IMX500Detector:
                     if d.category in self.detect_classes:
                         relevant_detections.append(d)
                         # Create debug message with fixed format location
-                        lat = vehicle_location['latitude']
-                        lng = vehicle_location['longitude'] 
-                        alt = vehicle_location['altitude']
+                        lat = vehicle_location['lat']
+                        lng = vehicle_location['lon'] 
+                        alt = vehicle_location['alt']
                         msg = (
                             f"{datetime.now().isoformat()}: "
                             f"{self._intrinsics.labels[d.category]} "
