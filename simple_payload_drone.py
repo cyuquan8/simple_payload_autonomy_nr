@@ -21,7 +21,9 @@ from picamera2.devices.imx500 import (
     NetworkIntrinsics,
     postprocess_nanodet_detection
 )
+from picamera2.devices.imx500.postprocess import scale_boxes
 from rpi_hardware_pwm import HardwarePWM
+from typing import Any
 
 @dataclass
 class Detection:
@@ -194,8 +196,13 @@ class SimplePayloadDrone:
     #########################
 
     @property
-    def logger(self):
-        """ Get logger"""
+    def logger(self) -> logging.Logger:
+        """
+        Get logger instance.
+        
+        Returns:
+            logging.Logger: Logger instance for this class
+        """
         return self._logger
     
     ##################################
@@ -206,10 +213,18 @@ class SimplePayloadDrone:
             self, 
             detections: list[Detection], 
             image: np.ndarray,
-            location: dict,
+            location: dict[str, Any],
         ) -> bytes:
         """
         Encode detections and image into bytes for UDP transmission.
+        
+        Args:
+            detections: List of Detection objects to encode
+            image: NumPy array representing the image
+            location: Dictionary containing location data (lat, lon, alt)
+            
+        Returns:
+            bytes: JSON-encoded message as bytes for UDP transmission
         """
         # Encode image to JPEG bytes with configurable quality
         _, img_encoded = cv2.imencode(
@@ -241,13 +256,19 @@ class SimplePayloadDrone:
         # Convert to JSON and encode as bytes
         return json.dumps(message).encode('utf-8')
     
-    def _parse_detections(self, request):
+    def _parse_detections(
+            self, 
+            request
+        ) -> tuple[list[Detection], np.ndarray | None]:
         """
         Parse the output tensor into a number of detected objects, scaled to the
         ISP output.
         
         Args:
             request: Picamera2 request object with both metadata and image data
+            
+        Returns:
+            tuple: (list of Detection objects, image array or None)
         """
         metadata = request.get_metadata()
         np_outputs = self._imx500.get_outputs(metadata, add_batch=True)
@@ -263,7 +284,6 @@ class SimplePayloadDrone:
                     iou_thres=self.iou,
                     max_out_dets=self.max_detections
                 )[0]
-            from picamera2.devices.imx500.postprocess import scale_boxes
             boxes = scale_boxes(
                 boxes, 
                 1, 
@@ -309,8 +329,17 @@ class SimplePayloadDrone:
     ### Drawing helper functions ###
     ################################
 
-    def _draw_detections(self, request, stream="main"):
-        """Draw the detections for this request onto the ISP output."""
+    def _draw_detections(self, request, stream: str = "main") -> None:
+        """
+        Draw the detections for this request onto the ISP output.
+        
+        Args:
+            request: Picamera2 request object
+            stream: Stream name to draw on (default "main")
+            
+        Returns:
+            None
+        """
         with self._detections_lock:
             detections_to_draw = self._last_detections.copy()
         if not detections_to_draw:
@@ -351,7 +380,13 @@ class SimplePayloadDrone:
         ) -> np.ndarray:
         """
         Helper function to draw detection bounding boxes and labels on an image.
-        Returns a copy of the image with detections drawn.
+        
+        Args:
+            detections: List of Detection objects to draw
+            image: NumPy array representing the image
+            
+        Returns:
+            np.ndarray: Copy of the image with detections drawn
         """
         if not detections:
             return image
@@ -377,7 +412,14 @@ class SimplePayloadDrone:
         ) -> None:
         """
         Helper function to draw a single detection box and label on an image.
-        Modifies the image in-place.
+        
+        Args:
+            detection: Detection object to draw
+            image: NumPy array representing the image (modified in-place)
+            labels: List of label strings
+            
+        Returns:
+            None
         """
         x, y, w, h = detection.box
         label = f"{labels[detection.category]} ({detection.conf:.2f})"
@@ -439,13 +481,20 @@ class SimplePayloadDrone:
     #######################################
 
     @staticmethod
-    def _get_distance_metres(aLocation1, aLocation2):
+    def _get_distance_metres(aLocation1, aLocation2) -> float:
         """
         Return the ground distance in metres between two LocationGlobal objects.
 
         This method is an approximation, and will not be accurate over large 
         distances and close to the earth's poles. It comes from the ArduPilot 
         test code.
+        
+        Args:
+            aLocation1: First LocationGlobal object
+            aLocation2: Second LocationGlobal object
+            
+        Returns:
+            float: Distance in metres between the two locations
         """
         dlat = aLocation2.lat - aLocation1.lat
         dlong = aLocation2.lon - aLocation1.lon
@@ -459,12 +508,15 @@ class SimplePayloadDrone:
     ### Message queue helper functions ###
     ######################################
 
-    def _dequeue_message(self):
+    def _dequeue_message(self) -> bytes | None:
         """
         Helper function to dequeue a message with proper error handling.
         
+        Args:
+            None
+            
         Returns:
-            Message from queue or None if error/timeout
+            bytes | None: Message from queue or None if error/timeout
         """
         try:
             message = self._message_queue.get(
@@ -482,12 +534,15 @@ class SimplePayloadDrone:
             self._logger.error(f"Failed to dequeue message: {e}")
             return None
 
-    def _enqueue_message(self, message):
+    def _enqueue_message(self, message: bytes) -> None:
         """
         Helper function to enqueue a message with proper error handling.
         
         Args:
-            message: Message to enqueue
+            message: Bytes message to enqueue for UDP transmission
+            
+        Returns:
+            None
         """
         try:
             self._message_queue.put(
@@ -503,9 +558,15 @@ class SimplePayloadDrone:
         except Exception as e:
             self._logger.error(f"Failed to queue detection message: {e}")
     
-    def _enqueue_sentinel(self):
+    def _enqueue_sentinel(self) -> None:
         """
         Enqueue the sentinel object to signal shutdown to UDP worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         # Always block indefinitely for sentinel to ensure shutdown happens
         self._message_queue.put(self._sentinel, block=True, timeout=None)
@@ -513,12 +574,15 @@ class SimplePayloadDrone:
     ################################
     ### Vehicle helper functions ###
     ################################
-    def _get_vehicle_location(self):
+    def _get_vehicle_location(self) -> dict[str, Any]:
         """
         Get current vehicle location if vehicle is connected.
         
+        Args:
+            None
+            
         Returns:
-            dict or None: Location data with lat/lng or None if no vehicle
+            dict[str, Any]: Location with lat/lon/alt keys (values may be None)
         """
         if self._vehicle is None:
             return {
@@ -534,12 +598,15 @@ class SimplePayloadDrone:
             'alt': location.alt
         }
 
-    def _get_vehicle_pitch(self):
+    def _get_vehicle_pitch(self) -> float | None:
         """
         Get current vehicle pitch if vehicle is connected.
         
+        Args:
+            None
+            
         Returns:
-            float or None: Pitch or None if no vehicle
+            float | None: Pitch in radians or None if no vehicle
         """
         if self._vehicle is None:
             return None
@@ -549,9 +616,18 @@ class SimplePayloadDrone:
     ### Thread handler functions ###
     ################################
 
-    def _start_camera_pitch_worker(self):
+    def _start_camera_pitch_worker(self) -> None:
         """
         Start the camera pitch worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If camera pitch worker is already started
         """
         if self._camera_pitch_thread is not None:
             raise RuntimeError("Camera pitch worker already started")
@@ -565,9 +641,15 @@ class SimplePayloadDrone:
         self._camera_pitch_thread.start()
         self._logger.info("Started camera pitch worker thread")
 
-    def _stop_camera_pitch_worker(self):
+    def _stop_camera_pitch_worker(self) -> None:
         """
         Stop the camera pitch worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         if self._camera_pitch_thread is not None:
             self._logger.info("Stopping camera pitch worker...")
@@ -581,9 +663,18 @@ class SimplePayloadDrone:
                 self._logger.info("Camera pitch worker thread stopped")
             self._camera_pitch_thread = None
 
-    def _start_detection_worker(self):
+    def _start_detection_worker(self) -> None:
         """
         Start the detection worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If detection worker is already started
         """
         if self._detection_thread is not None:
             raise RuntimeError("Detection worker already started")
@@ -597,9 +688,15 @@ class SimplePayloadDrone:
         self._detection_thread.start()
         self._logger.info("Started detection worker thread")
 
-    def _stop_detection_worker(self):
+    def _stop_detection_worker(self) -> None:
         """
         Stop the detection worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         if self._detection_thread is not None:
             self._logger.info("Stopping detection worker...")
@@ -613,9 +710,18 @@ class SimplePayloadDrone:
                 self._logger.info("Detection worker thread stopped")
             self._detection_thread = None
 
-    def _start_goto_waypoints_worker(self):
+    def _start_goto_waypoints_worker(self) -> None:
         """
-        Start the goto waypoints thread
+        Start the goto waypoints worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If goto waypoints worker is already started
         """
         if self._goto_waypoints_thread is not None:
             raise RuntimeError("Goto waypoints worker already started")
@@ -629,9 +735,15 @@ class SimplePayloadDrone:
         self._goto_waypoints_thread.start()
         self._logger.info("Started goto waypoints worker thread")
 
-    def _stop_goto_waypoints_worker(self):
+    def _stop_goto_waypoints_worker(self) -> None:
         """
         Stop the goto waypoints worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         if self._goto_waypoints_thread is not None:
             self._logger.info("Stopping goto waypoints worker...")
@@ -645,9 +757,18 @@ class SimplePayloadDrone:
                 self._logger.info("Goto waypoints worker thread stopped")
             self._goto_waypoints_thread = None
 
-    def _start_udp_publisher(self):
+    def _start_udp_publisher(self) -> None:
         """
         Start the UDP publisher thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If UDP publisher is already started
         """
         if self._udp_thread is not None:
             raise RuntimeError("UDP publisher already started")
@@ -660,9 +781,15 @@ class SimplePayloadDrone:
         self._udp_thread.start()
         self._logger.info("Started UDP publisher thread")
     
-    def _stop_udp_publisher(self):
+    def _stop_udp_publisher(self) -> None:
         """
         Stop the UDP publisher thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         if self._udp_thread is not None:
             self._logger.info("Stopping UDP publisher...")
@@ -676,9 +803,15 @@ class SimplePayloadDrone:
                 self._logger.info("UDP publisher thread stopped")
             self._udp_thread = None
     
-    def _start_threads(self):
+    def _start_threads(self) -> None:
         """
         Start all required threads based on operation mode.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Starting threads...")
         
@@ -698,9 +831,15 @@ class SimplePayloadDrone:
         
         self._logger.info("All threads started successfully")
 
-    def _stop_threads(self):
+    def _stop_threads(self) -> None:
         """
         Stop all running threads gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Stopping threads...")
         
@@ -726,9 +865,15 @@ class SimplePayloadDrone:
     ### Thread worker functions ###
     ###############################
 
-    def _camera_pitch_worker(self):
+    def _camera_pitch_worker(self) -> None:
         """
         Worker thread function that handles camera pitch correction with servo.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Camera pitch worker started")
         
@@ -764,9 +909,15 @@ class SimplePayloadDrone:
         
         self._logger.info("Camera pitch worker stopped")
 
-    def _detection_worker(self):
+    def _detection_worker(self) -> None:
         """
         Worker thread function that continuously runs detection processing.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Detection worker started")
         
@@ -832,9 +983,15 @@ class SimplePayloadDrone:
         
         self._logger.info("Detection worker stopped")
 
-    def _goto_waypoints_worker(self):
+    def _goto_waypoints_worker(self) -> None:
         """
-        Worker thread function to make vehicle go to a series of waypoints
+        Worker thread function to make vehicle go to a series of waypoints.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Goto waypoints worker started")
         
@@ -846,9 +1003,15 @@ class SimplePayloadDrone:
 
         self._logger.info("Goto waypoints worker stopped")
 
-    def _udp_publisher_worker(self):
+    def _udp_publisher_worker(self) -> None:
         """
         Worker thread function to process message queue and send UDP messages.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("UDP publisher worker started")
         
@@ -894,9 +1057,15 @@ class SimplePayloadDrone:
     ### Exposed functions ###
     #########################
     
-    def cleanup(self):
+    def cleanup(self) -> None:
         """
         Cleanup drone resources and stop background threads.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         self._logger.info("Cleaning up drone resources...")
         self._shutdown_event.set()
@@ -907,10 +1076,16 @@ class SimplePayloadDrone:
         self._shutdown_event.clear()
         self._logger.info("Drone cleanup complete")
     
-    def run(self):
+    def run(self) -> None:
         """
         Run the drone in the appropriate mode based on debug settings.
         This method blocks until interrupted.
+        
+        Args:
+            None
+            
+        Returns:
+            None
         """
         if self.debug_camera:
             self._logger.info("Running in camera-control-only mode")
@@ -926,8 +1101,16 @@ class SimplePayloadDrone:
         # Wait for shutdown event while worker threads process in background
         self._shutdown_event.wait()
 
-    def start(self, show_preview=True):
-        """Start the drone system"""
+    def start(self, show_preview: bool = True) -> None:
+        """
+        Start the drone system.
+        
+        Args:
+            show_preview: Whether to show camera preview (default True)
+            
+        Returns:
+            None
+        """
         config = self._picam2.create_preview_configuration(
             controls={"FrameRate": self._intrinsics.inference_rate}, 
             buffer_count=self.buffer_count,
@@ -955,7 +1138,16 @@ class SimplePayloadDrone:
         self._logger.info("Signaling threads to begin processing")
         self._start_event.set()
 
-def get_args():
+def get_args() -> argparse.Namespace:
+    """
+    Parse command line arguments for the drone system.
+    
+    Args:
+        None
+        
+    Returns:
+        argparse.Namespace: Parsed command line arguments
+    """
     parser = argparse.ArgumentParser(description="Simple Payload Drone")
     
     # Camera
@@ -1213,7 +1405,16 @@ def get_args():
     
     return parser.parse_args()
 
-def main():
+def main() -> None:
+    """
+    Main entry point for the drone application.
+    
+    Args:
+        None
+        
+    Returns:
+        None
+    """
     args = get_args()
     drone = SimplePayloadDrone(args)
     
