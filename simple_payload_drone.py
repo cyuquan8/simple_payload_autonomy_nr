@@ -12,9 +12,9 @@ import time
 import threading
 import socket
 
+from dataclasses import dataclass
 from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
-from dataclasses import dataclass
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -25,9 +25,9 @@ from rpi_hardware_pwm import HardwarePWM
 
 @dataclass
 class Detection:
+    box: tuple[int, int, int, int]
     category: int
     conf: float
-    box: tuple[int, int, int, int]
         
 class SimplePayloadDrone:
     def __init__(self, args: argparse.Namespace):
@@ -206,7 +206,7 @@ class SimplePayloadDrone:
             self, 
             detections: list[Detection], 
             image: np.ndarray,
-            location: dict | None = None
+            location: dict,
         ) -> bytes:
         """
         Encode detections and image into bytes for UDP transmission.
@@ -291,13 +291,13 @@ class SimplePayloadDrone:
         
         new_detections = [
             Detection(
-                int(category),
-                score,
                 self._imx500.convert_inference_coords(
                     box, 
                     metadata,
                     self._picam2
-                )
+                ),
+                int(category),
+                score,
             )
             for box, score, category in zip(boxes, scores, classes)
             if score > self.threshold
@@ -802,7 +802,6 @@ class SimplePayloadDrone:
                         lng = vehicle_location['lon'] 
                         alt = vehicle_location['alt']
                         msg = (
-                            f"{datetime.now().isoformat()}: "
                             f"{self._intrinsics.labels[d.category]} "
                             f"detected with {d.conf:.2f} confidence "
                             f"at lat:{lat}, lng:{lng}, alt:{alt}"
@@ -902,6 +901,8 @@ class SimplePayloadDrone:
         self._logger.info("Cleaning up drone resources...")
         self._shutdown_event.set()
         self._stop_threads()
+        if hasattr(self, '_sock') and self._sock:
+            self._sock.close()
         self._start_event.clear()
         self._shutdown_event.clear()
         self._logger.info("Drone cleanup complete")
@@ -955,7 +956,7 @@ class SimplePayloadDrone:
         self._start_event.set()
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Simple Payload Drone")
     
     # Camera
     parser.add_argument(
