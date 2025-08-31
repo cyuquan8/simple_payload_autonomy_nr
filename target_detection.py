@@ -18,6 +18,7 @@ from picamera2.devices.imx500 import (
     NetworkIntrinsics,
     postprocess_nanodet_detection
 )
+from pymavlink import mavutil
 
 @dataclass
 class Detection:
@@ -150,6 +151,16 @@ class IMX500Detector:
                 wait_ready=True, 
                 baud=self.rpi_baud_rate
             )
+            # set vehicle speed
+            self.vehicle.groundspeed = 2
+            # Set waypoints
+            self.waypoints = [
+                LocationGlobalRelative(42.770265, -115.590505, 30),
+                LocationGlobalRelative(42.768704, -115.590599, 30),
+                LocationGlobalRelative(42.768258, -115.589166, 30),
+                LocationGlobalRelative(42.769051, -115.589176, 30),
+                LocationGlobalRelative(42.769821, -115.590282, 30)
+            ]
         if args.udp_pub:
             self.sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
@@ -319,26 +330,90 @@ class IMX500Detector:
                     (b_x + b_w, b_y + b_h), 
                     (255, 0, 0, 0)
                 )
-    
+    @staticmethod
+    def _get_distance_metres(aLocation1, aLocation2):
+        """
+        Returns the ground distance in metres between two LocationGlobal objects.
+
+        This method is an approximation, and will not be accurate over large distances and close to the 
+        earth's poles. It comes from the ArduPilot test code: 
+        https://github.com/diydrones/ardupilot/blob/master/Tools/autotest/common.py
+        """
+        dlat = aLocation2.lat - aLocation1.lat
+        dlong = aLocation2.lon - aLocation1.lon
+        return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
+
+    def goto(self, targetLocation, gotoFunction=None):
+        """
+        Moves the vehicle to a position (Lat, Long, Alt).
+
+        The method takes a function pointer argument with a single `dronekit.lib.LocationGlobal` parameter for 
+        the target position. This allows it to be called with different position-setting commands. 
+        By default it uses the standard method: dronekit.lib.Vehicle.simple_goto().
+
+        The method reports the distance to target.
+        """
+        if gotoFunction is None:
+            gotoFunction = self.vehicle.simple_goto
+
+        currentLocation = self.vehicle.location.global_relative_frame
+        targetDistance = self._get_distance_metres(currentLocation, targetLocation)
+        gotoFunction(targetLocation)
+
+        #print "DEBUG: targetLocation: %s" % targetLocation
+        #print "DEBUG: targetLocation: %s" % targetDistance
+        loc_msg = f"Going to targetLocation {targetLocation}"
+        self._logger.debug(loc_msg)
+        if self.udp_pub:
+            loc_msg_enc = loc_msg.encode('utf-8')
+            self.sock.sendto(loc_msg_enc, (self.udp_ip, self.udp_port))
+
+        while self.vehicle.mode.name=="GUIDED": #Stop action if we are no longer in guided mode.
+            #print "DEBUG: mode: %s" % vehicle.mode.name
+            remainingDistance=self._get_distance_metres(self.vehicle.location.global_relative_frame, targetLocation)
+            # print("Distance to target: ", remainingDistance)
+            dist_msg = f"Distance to target: {remainingDistance}"
+            self._logger.debug(dist_msg)
+            if self.udp_pub:
+                dist_msg_enc = dist_msg.encode('utf-8')
+                self.sock.sendto(dist_msg_enc, (self.udp_ip, self.udp_port))
+            if remainingDistance<=targetDistance*0.01: #Just below target, in case of undershoot.
+                # print("Reached target")
+                target_msg = f"Reached target {targetLocation}"
+                self._logger.debug(target_msg)
+                if self.udp_pub:
+                    target_msg_enc = target_msg.encode('utf-8')
+                    self.sock.sendto(target_msg_enc, (self.udp_ip, self.udp_port))
+                break;
+            time.sleep(0.5)
+
+    def goto_waypoints(self):
+        """ Go through a list of waypoints """
+        while True:
+            if self.vehicle.mode.name == "GUIDED":
+                break
+        for wp in self.waypoints:
+            self._logger.info(f"Going to waypoint: {wp}")
+            self.goto(wp)
+
     def _camera_servo(self):
         """ Helper function to run camera pitch correction with camera detection """
         pitch = math.degrees(self.vehicle.attitude.pitch)
         #self._logger.debug(f"Pitch: {pitch:.2f} degrees")
                 
         # Compensate
-        servo_angle = self.base_angle - pitch  
+        servo_angle = self.base_angle + pitch
 
         # Limit servo movement
         servo_angle = max(min(servo_angle, 90), 0)
 
         # Convert angle to duty cycle
-        duty_cycle = 5 + (servo_angle / 90) * 5  
+        duty_cycle = 5 + (servo_angle / 90) * 5
 
         # self._logger.debug(
         #     f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
         # )
         self.pwm.change_duty_cycle(duty_cycle)
-
         time.sleep(0.02)  # 20 ms update
 
     def camera_pitch(self):
@@ -361,7 +436,7 @@ class IMX500Detector:
                 f"Servo angle: {servo_angle:.1f}°, Duty: {duty_cycle:.2f}%"
             )
             self.pwm.change_duty_cycle(duty_cycle)
-
+            
             time.sleep(0.02)  # 20 ms update
 
     def detect(self, classes: list[int]):
@@ -392,6 +467,7 @@ class IMX500Detector:
                     if self.udp_pub:
                         msg_data=msg.encode('utf-8')
                         self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
+                        self._logger.debug(f"Sent UDP to {self.udp_ip}:{self.udp_port}")
 
             # Small delay to prevent overwhelming the system
             time.sleep(0.1)
@@ -405,19 +481,20 @@ class IMX500Detector:
         while True:
             # Adjust camera pitch with helper function
             self._camera_servo()
+            loc = self.vehicle.location.global_relative_frame
 
             # Get the latest detections
             self.last_results = self.parse_detections(
                 self.picam2.capture_metadata()
             )
-
+            msg = (f"{datetime.now()}@ location: {loc}")
             for detection in self.last_results:
                 d_cls = detection.category
                 conf = detection.conf
         
                 # Print when a target is detected with high confidence
                 if d_cls in classes:
-                    loc=self.vehicle.location.global_frame
+                    # loc=self.vehicle.location.global_relative_frame
 
                     # Message
                     msg=(
@@ -426,11 +503,11 @@ class IMX500Detector:
                     )
                     self._logger.debug(msg)
 
-                    if self.udp_pub:
-                        msg_data=msg.encode('utf-8')
-                        # TODO: Encode detection image to bytes and pub
-                        self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
-    
+            if self.udp_pub:
+                msg_data=msg.encode('utf-8')
+                # TODO: Encode detection image to bytes and pub
+                self.sock.sendto(msg_data, (self.udp_ip, self.udp_port))
+
             # Small delay to prevent overwhelming the system
             time.sleep(0.1)
     
@@ -458,6 +535,14 @@ def get_args():
         default=False,
         help="Debugging mode. Runs detect()"
     )
+
+    parser.add_argument(
+        "--debug-waypoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Debugging mode. Runs goto_waypoints()"
+    )
+
     parser.add_argument(
         "--show-preview",
         action=argparse.BooleanOptionalAction,
@@ -628,13 +713,13 @@ def get_args():
     )
     parser.add_argument(
         "--udp-ip",
-        default="192.168.0.109",
+        default="10.5.0.1",
         help="UDP IP Address",
         type=str
     )
     parser.add_argument(
         "--udp-port",
-        default=14550,
+        default=5602,
         help="UDP Port",
         type=int
     )
@@ -657,6 +742,8 @@ def main():
             detector.camera_pitch()
         elif args.debug_detect:
             detector.detect(args.detect_classes)
+        elif args.debug_waypoints:
+            detector.goto_waypoints()
         else:
             detector.camera_pitch_detect(args.detect_classes)
     except KeyboardInterrupt as e:
