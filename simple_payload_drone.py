@@ -11,6 +11,7 @@ import queue
 import time
 import threading
 import socket
+import json
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -500,9 +501,39 @@ class SimplePayloadDrone:
         dlong = aLocation2.lon - aLocation1.lon
         return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
     
-    def _goto_waypoint(self):
-        # TODO
-        pass
+    def _goto_waypoint(self, targetLocation, gotoFunction=None) -> None:
+        """ Helper function to run goto waypoints with vehicle """
+        if gotoFunction is None:
+            gotoFunction = self.vehicle.simple_goto
+
+        currentLocation = self.vehicle.location.global_relative_frame
+        targetDistance = self._get_distance_metres(currentLocation, targetLocation)
+        gotoFunction(targetLocation)
+
+        loc_msg = f"Going to targetLocation {targetLocation}"
+        self._logger.debug(loc_msg)
+        if self.udp_pub:
+            loc_msg_enc = loc_msg.encode('utf-8')
+            self.sock.sendto(loc_msg_enc, (self.udp_ip, self.udp_port))
+
+        while self.vehicle.mode.name=="GUIDED": #Stop action if we are no longer in guided mode.
+            #print "DEBUG: mode: %s" % vehicle.mode.name
+            remainingDistance=self._get_distance_metres(self.vehicle.location.global_relative_frame, targetLocation)
+            # print("Distance to target: ", remainingDistance)
+            dist_msg = f"Distance to target: {remainingDistance}"
+            self._logger.debug(dist_msg)
+            if self.udp_pub:
+                dist_msg_enc = dist_msg.encode('utf-8')
+                self.sock.sendto(dist_msg_enc, (self.udp_ip, self.udp_port))
+            if remainingDistance<=targetDistance*0.01: #Just below target, in case of undershoot.
+                # print("Reached target")
+                target_msg = f"Reached target {targetLocation}"
+                self._logger.debug(target_msg)
+                if self.udp_pub:
+                    target_msg_enc = target_msg.encode('utf-8')
+                    self.sock.sendto(target_msg_enc, (self.udp_ip, self.udp_port))
+                break;
+            time.sleep(0.5)
 
     ######################################
     ### Message queue helper functions ###
@@ -734,6 +765,53 @@ class SimplePayloadDrone:
         )
         self._goto_waypoints_thread.start()
         self._logger.info("Started goto waypoints worker thread")
+
+        """ wait for vehicle to be in guided mode """
+        while True:
+            if self.vehicle.mode.name == "GUIDED":
+                break
+
+        """ Go through waypoints and goto each one """
+        waypoints_array = self._parse_json_to_waypoints("waypoints/waypoints.json")
+        for wp in waypoints_array:
+            self._logger.info(f"Going to waypoint: {wp}")
+            self._goto_waypoints_worker(wp)
+
+    def _parse_json_to_waypoints(self, json_filepath: str) -> tuple:
+        """
+        Reads coordinate data from a JSON file and returns a tuple of LocationGlobalRelative objects.
+        """
+        # Create a list to store the LocationGlobalRelative objects
+        waypoint_objects = []
+
+        try:
+            # Open and load the JSON file
+            # 'json_filepath' should be the variable, not a hardcoded path
+            with open(json_filepath, 'r') as file:
+                data = json.load(file)
+            
+            # Check if the data is a list as expected
+            if isinstance(data, list):
+                print("Successfully read coordinates:")
+                for i, coord in enumerate(data):
+                    # Unpack the list for easier access
+                    latitude, longitude, altitude = coord
+                    
+                    # Create the LocationGlobalRelative object with correct syntax
+                    waypoint = LocationGlobalRelative(latitude, longitude, altitude)
+                    waypoint_objects.append(waypoint)
+            else:
+                print("Error: The JSON data is not in the expected list of lists format.")
+
+        except FileNotFoundError:
+            print(f"Error: The file '{json_filepath}' was not found.")
+        except json.JSONDecodeError:
+            print(f"Error: Could not decode JSON from the file '{json_filepath}'. Please check the file's format.")
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+        
+        return (waypoint_objects)
+
 
     def _stop_goto_waypoints_worker(self) -> None:
         """
