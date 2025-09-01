@@ -152,6 +152,14 @@ class SimplePayloadDrone:
         self.max_detections = args.max_detections
         self.threshold = args.threshold
         self.vflip = args.vflip
+        # Waypoint parameters
+        self.wpt_json_dir = args.wpt_json_dir
+        self.wpt_json_filename = args.wpt_json_filename
+        self.wpt_json_filepath = os.path.join(
+            self.wpt_json_dir, 
+            self.wpt_json_filename
+        )
+        self.wpt_arrival_threshold = args.wpt_arrival_threshold
         
         # Threads
         
@@ -188,6 +196,15 @@ class SimplePayloadDrone:
         if args.udp_pub:
             self._sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
+        # Setup waypoints from json
+        self._wpt_goto_list = self._parse_json_to_waypoints(
+            self.wpt_json_filepath
+        )
+        if not self._wpt_goto_list:
+            raise RuntimeError(
+                f"Error loading waypoints from {self.wpt_json_filepath}"
+            )
+
         # Store detections with thread safety
         self._detections_lock = threading.Lock()
         self._last_detections: list[Detection] = []
@@ -501,39 +518,170 @@ class SimplePayloadDrone:
         dlong = aLocation2.lon - aLocation1.lon
         return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
     
-    def _goto_waypoint(self, targetLocation, gotoFunction=None) -> None:
-        """ Helper function to run goto waypoints with vehicle """
-        if gotoFunction is None:
-            gotoFunction = self.vehicle.simple_goto
+    def _goto_waypoint(self, targetLocation: LocationGlobalRelative) -> None:
+        """
+        Navigate vehicle to a specific waypoint using DroneKit simple_goto.
+        
+        Commands the vehicle to navigate to the specified target location and
+        monitors progress until the waypoint is reached or the vehicle exits
+        GUIDED mode. Uses a distance-based approach to determine arrival.
+        
+        Args:
+            targetLocation: Target waypoint as LocationGlobalRelative object
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If vehicle is None or not available
+            
+        Note:
+            This function blocks until the waypoint is reached or the vehicle
+            exits GUIDED mode. The arrival threshold is configurable via
+            wpt_arrival_threshold parameter (default 1% of initial distance)
+            to handle GPS accuracy limitations.
+        """
+        # Validate vehicle availability
+        if self._vehicle is None:
+            self._goto_waypoints_active = False
+            raise RuntimeError("Vehicle is None")
+        # Get current position and calculate initial distance
+        currentLocation = self._vehicle.location.global_relative_frame
+        targetDistance = self._get_distance_metres(
+            currentLocation, 
+            targetLocation
+        )
+        # Command vehicle to navigate to target
+        self._vehicle.simple_goto(targetLocation)
+        self._logger.info(f"Going to target location {targetLocation}")
 
-        currentLocation = self.vehicle.location.global_relative_frame
-        targetDistance = self._get_distance_metres(currentLocation, targetLocation)
-        gotoFunction(targetLocation)
+        # Monitor progress until arrival or shutdown
+        while self._goto_waypoints_active and not self._shutdown_event.is_set():
+            # Check if vehicle is still in GUIDED mode
+            current_mode = self._vehicle.mode.name
+            if current_mode != "GUIDED":
+                self._logger.warning(
+                    f"Waypoint navigation stopped - "
+                    f"vehicle changed to {current_mode} mode"
+                )
+                self._goto_waypoints_active = False
+                break
+            # Calculate remaining distance to target
+            remainingDistance = self._get_distance_metres(
+                self._vehicle.location.global_relative_frame, 
+                targetLocation
+            )
+            self._logger.debug(f"Distance to target: {remainingDistance:.2f}m")
+            # Check if we've reached the target using arrival threshold
+            if remainingDistance <= targetDistance * self.wpt_arrival_threshold:
+                self._logger.debug(f"Reached target {targetLocation}")
+                break
+            time.sleep(0.5) # Wait before next distance check
+        
+        # Log reason for exit if interrupted by shutdown
+        if not self._goto_waypoints_active: 
+            self._logger.warning(
+                f"Waypoint navigation to {targetLocation} interuppted"
+            )
+        elif self._shutdown_event.is_set():
+            self._logger.info("Waypoint navigation interrupted by shutdown")
 
-        loc_msg = f"Going to targetLocation {targetLocation}"
-        self._logger.debug(loc_msg)
-        if self.udp_pub:
-            loc_msg_enc = loc_msg.encode('utf-8')
-            self.sock.sendto(loc_msg_enc, (self.udp_ip, self.udp_port))
+    def _parse_json_to_waypoints(
+            self, 
+            filepath: str
+        ) -> list[LocationGlobalRelative] | None:
+        """
+        Parse coordinate data from a JSON file into LocationGlobalRelative 
+        objects.
+        
+        Reads a JSON file containing waypoint data with lat/lon/alt coordinates
+        and converts them into DroneKit LocationGlobalRelative objects for
+        navigation use.
+        
+        Args:
+            filepath: Path to the JSON file containing waypoint data
+        
+        Returns:
+            list[LocationGlobalRelative] | None: List of waypoint objects if 
+                successful, None if file not found, invalid JSON, or other 
+                errors occur
+        
+        Raises:
+            None: All exceptions are caught and logged, returning None on 
+                failure
+        
+        Expected JSON format:
+            [
+                {"lat": float, "lon": float, "alt": float},
+                {"lat": float, "lon": float, "alt": float},
+                ...
+            ]
+        """
+        try:
+            waypoint_objects: list[LocationGlobalRelative] = []
+            with open(filepath, 'r') as file:
+                data = json.load(file)
+            # Validate data structure - must be a list of waypoint dictionaries
+            if not isinstance(data, list):
+                self._logger.error(
+                    f"Invalid JSON structure in {filepath}: expected list, "
+                    f"got {type(data).__name__}"
+                )
+                return None
+            
+            # Parse each waypoint dictionary into LocationGlobalRelative object
+            for i, waypoint_data in enumerate(data):
+                if not isinstance(waypoint_data, dict):
+                    self._logger.error(
+                        f"Invalid waypoint at index {i} in {filepath}: "
+                        f"expected dict, got {type(waypoint_data).__name__}"
+                    )
+                    return None
+                # Validate required keys
+                required_keys = {'lat', 'lon', 'alt'}
+                if not required_keys.issubset(waypoint_data.keys()):
+                    missing_keys = required_keys - waypoint_data.keys()
+                    self._logger.error(
+                        f"Missing required keys {missing_keys} in waypoint "
+                        f"{i} from {filepath}"
+                    )
+                    return None
+                try:
+                    waypoint = LocationGlobalRelative(
+                        latitude=float(waypoint_data['lat']), 
+                        longitude=float(waypoint_data['lon']), 
+                        altitude=float(waypoint_data['alt'])
+                    )
+                    waypoint_objects.append(waypoint)
+                except (ValueError, TypeError) as e:
+                    self._logger.error(
+                        f"Invalid coordinate values in waypoint {i} "
+                        f"from {filepath}: {e}"
+                    )
+                    return None
+            
+            if not waypoint_objects:
+                self._logger.warning(
+                    f"No valid waypoints parsed from {filepath}"
+                )
+                return None
+            self._logger.info(
+                f"Successfully parsed {len(waypoint_objects)} waypoints "
+                f"from {filepath}"
+            )
 
-        while self.vehicle.mode.name=="GUIDED": #Stop action if we are no longer in guided mode.
-            #print "DEBUG: mode: %s" % vehicle.mode.name
-            remainingDistance=self._get_distance_metres(self.vehicle.location.global_relative_frame, targetLocation)
-            # print("Distance to target: ", remainingDistance)
-            dist_msg = f"Distance to target: {remainingDistance}"
-            self._logger.debug(dist_msg)
-            if self.udp_pub:
-                dist_msg_enc = dist_msg.encode('utf-8')
-                self.sock.sendto(dist_msg_enc, (self.udp_ip, self.udp_port))
-            if remainingDistance<=targetDistance*0.01: #Just below target, in case of undershoot.
-                # print("Reached target")
-                target_msg = f"Reached target {targetLocation}"
-                self._logger.debug(target_msg)
-                if self.udp_pub:
-                    target_msg_enc = target_msg.encode('utf-8')
-                    self.sock.sendto(target_msg_enc, (self.udp_ip, self.udp_port))
-                break;
-            time.sleep(0.5)
+            return waypoint_objects
+        except FileNotFoundError:
+            self._logger.error(f"Waypoints file not found: {filepath}")
+            return None
+        except json.JSONDecodeError as e:
+            self._logger.error(f"Invalid JSON format in {filepath}: {e}")
+            return None
+        except Exception as e:
+            self._logger.error(
+                f"Unexpected error parsing waypoints from {filepath}: {e}"
+            )
+            return None
 
     ######################################
     ### Message queue helper functions ###
@@ -628,20 +776,6 @@ class SimplePayloadDrone:
             'lon': location.lon,
             'alt': location.alt
         }
-
-    def _get_vehicle_pitch(self) -> float | None:
-        """
-        Get current vehicle pitch if vehicle is connected.
-        
-        Args:
-            None
-            
-        Returns:
-            float | None: Pitch in radians or None if no vehicle
-        """
-        if self._vehicle is None:
-            return None
-        return self._vehicle.attitude.pitch
 
     ################################
     ### Thread handler functions ###
@@ -765,53 +899,6 @@ class SimplePayloadDrone:
         )
         self._goto_waypoints_thread.start()
         self._logger.info("Started goto waypoints worker thread")
-
-        """ wait for vehicle to be in guided mode """
-        while True:
-            if self.vehicle.mode.name == "GUIDED":
-                break
-
-        """ Go through waypoints and goto each one """
-        waypoints_array = self._parse_json_to_waypoints("waypoints/waypoints.json")
-        for wp in waypoints_array:
-            self._logger.info(f"Going to waypoint: {wp}")
-            self._goto_waypoints_worker(wp)
-
-    def _parse_json_to_waypoints(self, json_filepath: str) -> tuple:
-        """
-        Reads coordinate data from a JSON file and returns a tuple of LocationGlobalRelative objects.
-        """
-        # Create a list to store the LocationGlobalRelative objects
-        waypoint_objects = []
-
-        try:
-            # Open and load the JSON file
-            # 'json_filepath' should be the variable, not a hardcoded path
-            with open(json_filepath, 'r') as file:
-                data = json.load(file)
-            
-            # Check if the data is a list as expected
-            if isinstance(data, list):
-                print("Successfully read coordinates:")
-                for i, coord in enumerate(data):
-                    # Unpack the list for easier access
-                    latitude, longitude, altitude = coord
-                    
-                    # Create the LocationGlobalRelative object with correct syntax
-                    waypoint = LocationGlobalRelative(latitude, longitude, altitude)
-                    waypoint_objects.append(waypoint)
-            else:
-                print("Error: The JSON data is not in the expected list of lists format.")
-
-        except FileNotFoundError:
-            print(f"Error: The file '{json_filepath}' was not found.")
-        except json.JSONDecodeError:
-            print(f"Error: Could not decode JSON from the file '{json_filepath}'. Please check the file's format.")
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-        
-        return (waypoint_objects)
-
 
     def _stop_goto_waypoints_worker(self) -> None:
         """
@@ -959,18 +1046,14 @@ class SimplePayloadDrone:
         self._start_event.wait()
         self._logger.info("Camera pitch worker ready to begin processing")
         
+        if self._vehicle is None:
+            self._camera_pitch_active = False
+            raise RuntimeError("Vehicle is None")
+        
         while self._camera_pitch_active and not self._shutdown_event.is_set():
             try:
-                pitch = self._get_vehicle_pitch()
-                if pitch is None:
-                    self._logger.warning(
-                        "No pitch obtained. Skipping servo correction."
-                    )
-                    continue
-                else:
-                    pitch = math.degrees(pitch)
-                    self._logger.debug(f"Pitch: {pitch:.2f} degrees")
-                        
+                pitch = math.degrees(self._vehicle.attitude.pitch)
+                self._logger.debug(f"Pitch: {pitch:.2f} degrees")
                 # Compensate
                 servo_angle = self.base_angle - pitch  
                 # Limit servo movement
@@ -1054,10 +1137,10 @@ class SimplePayloadDrone:
                     self._enqueue_message(message_bytes)
                 
                 # Small delay to prevent overwhelming the system
-                time.sleep(0.1)  # 10Hz detection rate
+                time.sleep(0.1) # 10Hz detection rate
             except Exception as e:
                 self._logger.error(f"Detection worker error: {e}")
-                time.sleep(0.1)  # Brief pause on error
+                time.sleep(0.1) # Brief pause on error
         
         self._logger.info("Detection worker stopped")
 
@@ -1077,8 +1160,72 @@ class SimplePayloadDrone:
         self._start_event.wait()
         self._logger.info("Goto waypoints worker ready to begin processing")
 
-        # TODO: Implement go to waypoint logic
+        if self._vehicle is None:
+            self._goto_waypoints_active = False
+            raise RuntimeError("Vehicle is None")
+        if self._wpt_goto_list is None:
+            self._goto_waypoints_active = False
+            raise RuntimeError("Goto waypoints is None")
 
+        # Wait for vehicle to be ready (in GUIDED mode)
+        self._logger.info(
+            "Waiting for vehicle to be ready for waypoint navigation..."
+        )
+        while self._goto_waypoints_active and not self._shutdown_event.is_set():
+            current_mode = self._vehicle.mode.name
+            if current_mode == "GUIDED":
+                self._logger.info("Vehicle is ready - in GUIDED mode")
+                break
+            else:
+                self._logger.debug(
+                    f"Waiting for GUIDED mode (currently {current_mode})"
+                )
+                time.sleep(0.5) # Check every 500ms
+        
+        # Execute waypoint navigation
+        self._logger.info(
+            f"Starting navigation through {len(self._wpt_goto_list)} waypoints"
+        )
+        for i, wp in enumerate(self._wpt_goto_list):
+            # Check for shutdown between waypoints
+            if not self._goto_waypoints_active or self._shutdown_event.is_set():
+                self._logger.info(f"Navigation interrupted at waypoint {i+1}")
+                break
+            try:
+                self._logger.info(
+                    f"Navigating to waypoint {i+1}/{len(self._wpt_goto_list)}: "
+                    f"{wp}"
+                )
+                self._goto_waypoint(wp)
+                self._logger.info(
+                    f"Reached waypoint {i+1}/{len(self._wpt_goto_list)}"
+                )
+            except Exception as e:
+                self._logger.error(f"Error navigating to waypoint {i+1}: {e}")
+                # Stop waypoint mission on error for safety
+                self._goto_waypoints_active = False
+                break
+
+        # Log termination reason based on current state
+        if not self._goto_waypoints_active:
+            # Active flag was set to False due to error
+            self._logger.info(
+                "Goto waypoints worker terminated - "
+                "stopped due to navigation error"
+            )
+        elif self._shutdown_event.is_set():
+            # Shutdown was requested
+            self._logger.info(
+                "Goto waypoints worker terminated - "
+                "interrupted by shutdown event"
+            )
+        else:
+            # Normal completion - finished all waypoints
+            self._logger.info(
+                "Goto waypoints worker completed - "
+                "all waypoints reached successfully"
+            )
+            self._goto_waypoints_active = False
         self._logger.info("Goto waypoints worker stopped")
 
     def _udp_publisher_worker(self) -> None:
@@ -1281,6 +1428,12 @@ def get_args() -> argparse.Namespace:
         help="Path to directory containing labels",
         type=str
     )
+    parser.add_argument(
+        "--wpt-json-dir",
+        default="./waypoints/",
+        help="Path to directory containing waypoint JSON files",
+        type=str
+    )
     
     # Logging
     parser.add_argument(
@@ -1377,45 +1530,6 @@ def get_args() -> argparse.Namespace:
         help="Use default intrinsics parameters"
     )
     
-    # Detection parameters
-    parser.add_argument(
-        "--detect-classes",
-        default=[],
-        nargs="+",
-        help="List of classes (int) to detect",
-        type=int
-    )
-    parser.add_argument(
-        "--hflip",
-        action=argparse.BooleanOptionalAction,
-        default=True, 
-        help="Whether to flip input image over horizontal plane"
-    )
-    parser.add_argument(
-        "--iou", 
-        default=0.65, 
-        help="IOU threshold",
-        type=float,
-    )
-    parser.add_argument(
-        "--max-detections", 
-        default=10, 
-        help="Max detections",
-        type=int,
-    )
-    parser.add_argument(
-        "--threshold",
-        default=0.55,
-        help="Detection threshold",
-        type=float,
-    )
-    parser.add_argument(
-        "--vflip",
-        action=argparse.BooleanOptionalAction,
-        default=True, 
-        help="Whether to flip input image over vertical plane"
-    )
-    
     # Comms parameters
     parser.add_argument(
         "--rpi-baud-rate",
@@ -1479,6 +1593,59 @@ def get_args() -> argparse.Namespace:
             "(None = no timeout, only used when blocking is enabled)"
         ),
         type=lambda x: None if x.lower() == 'none' else float(x)
+    )
+
+    # Detection parameters
+    parser.add_argument(
+        "--detect-classes",
+        default=[],
+        nargs="+",
+        help="List of classes (int) to detect",
+        type=int
+    )
+    parser.add_argument(
+        "--hflip",
+        action=argparse.BooleanOptionalAction,
+        default=True, 
+        help="Whether to flip input image over horizontal plane"
+    )
+    parser.add_argument(
+        "--iou", 
+        default=0.65, 
+        help="IOU threshold",
+        type=float,
+    )
+    parser.add_argument(
+        "--max-detections", 
+        default=10, 
+        help="Max detections",
+        type=int,
+    )
+    parser.add_argument(
+        "--threshold",
+        default=0.55,
+        help="Detection threshold",
+        type=float,
+    )
+    parser.add_argument(
+        "--vflip",
+        action=argparse.BooleanOptionalAction,
+        default=True, 
+        help="Whether to flip input image over vertical plane"
+    )
+
+    # Waypoint parameters
+    parser.add_argument(
+        "--wpt-json-filename",
+        default="waypoints.json",
+        help="Filename of the waypoint JSON file",
+        type=str
+    )
+    parser.add_argument(
+        "--wpt-arrival-threshold",
+        default=0.01,
+        help="Waypoint arrival threshold as fraction of initial distance",
+        type=float
     )
     
     return parser.parse_args()
