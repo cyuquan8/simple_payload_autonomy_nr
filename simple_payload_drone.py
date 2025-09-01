@@ -244,13 +244,21 @@ class SimplePayloadDrone:
         Returns:
             bytes: JSON-encoded message as bytes for UDP transmission
         """
+        # Convert BGR to RGB for correct color encoding
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         # Encode image to JPEG bytes with configurable quality
         _, img_encoded = cv2.imencode(
             '.jpg', 
-            image, 
+            image_rgb, 
             [cv2.IMWRITE_JPEG_QUALITY, self.udp_image_quality]
         )
-        img_base64 = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
+        jpeg_bytes = img_encoded.tobytes()
+        img_base64 = base64.b64encode(jpeg_bytes).decode('utf-8')
+        self._logger.debug(
+            f"Image encoding: JPEG={len(jpeg_bytes):,} bytes, "
+            f"Base64={len(img_base64):,} bytes, "
+            f"Quality={self.udp_image_quality}"
+        )
         
         # Convert detections to serializable format
         detection_data = []
@@ -272,7 +280,12 @@ class SimplePayloadDrone:
         }
         
         # Convert to JSON and encode as bytes
-        return json.dumps(message).encode('utf-8')
+        message_bytes = json.dumps(message).encode('utf-8')
+        self._logger.debug(
+            f"Total UDP message size: {len(message_bytes):,} bytes"
+        )
+        
+        return message_bytes
     
     def _parse_detections(
             self, 
