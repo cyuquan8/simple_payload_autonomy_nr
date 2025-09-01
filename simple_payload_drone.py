@@ -259,7 +259,7 @@ class SimplePayloadDrone:
             detection_data.append({
                 'box': d.box, # tuple -> JSON array automatically
                 'category': d.category, # int
-                'confidence': d.conf, # float
+                'confidence': float(d.conf), # Convert numpy float32 to float
                 'label': self._labels_used[d.category], # str
             })
         
