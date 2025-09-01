@@ -1100,7 +1100,7 @@ class SimplePayloadDrone:
                 request.release()  # Always release the request
 
                 # Store detections safely for preview drawing
-                if current_detections and current_image:
+                if current_detections and current_image is not None:
                     with self._detections_lock:
                         self._last_detections = current_detections
                 else:
@@ -1126,7 +1126,8 @@ class SimplePayloadDrone:
                         self._logger.debug(msg)
                 
                 # Send to message queue for UDP publishing if enabled
-                if self.udp_pub and relevant_detections and current_image:
+                if self.udp_pub and relevant_detections and \
+                    current_image is not None:
                     # Draw detections on captured image
                     annotated_image = self._draw_detections_on_image(
                         relevant_detections,
