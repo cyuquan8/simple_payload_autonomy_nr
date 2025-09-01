@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import piexif
 import socket
 import threading
 import time
@@ -79,6 +80,28 @@ class SimplePayloadGroundStation:
     ### Private Helper Functions ###
     ################################
     
+    @staticmethod
+    def _decimal_to_dms(decimal_degrees: float) -> list[tuple[int, int]]:
+        """
+        Convert decimal degrees to DMS format for EXIF GPS data.
+        
+        Args:
+            decimal_degrees: Coordinate in decimal degrees
+            
+        Returns:
+            list[tuple[int, int]]: DMS in EXIF format 
+                [(degrees, 1), (minutes, 1), (seconds_num, seconds_den)]
+        """
+        abs_degrees = abs(decimal_degrees)
+        degrees = int(abs_degrees)
+        minutes_float = (abs_degrees - degrees) * 60
+        minutes = int(minutes_float)
+        seconds = (minutes_float - minutes) * 60
+        
+        # EXIF format: 
+        # [(degrees, 1), (minutes, 1), (seconds_numerator, seconds_denominator)]
+        return [(degrees, 1), (minutes, 1), (int(seconds * 1000), 1000)]
+    
     def _decode_message(self, data: bytes) -> dict[str, Any] | None:
         """
         Decode received UDP message from drone.
@@ -98,13 +121,18 @@ class SimplePayloadGroundStation:
             self._logger.error(f"Failed to decode UTF-8 data: {e}")
             return None
     
-    def _save_image(self, image_data: str, timestamp: str) -> str | None:
+    def _save_image(self, 
+            image_data: str, 
+            timestamp: str, 
+            location_data: dict | None = None,
+        ) -> str | None:
         """
-        Save base64 encoded image to file.
+        Save base64 encoded image to file with GPS metadata.
         
         Args:
             image_data: Base64 encoded image string
             timestamp: Timestamp string for filename
+            location_data: Dictionary with lat/lon/alt data
             
         Returns:
             str: Saved image filepath
@@ -112,10 +140,36 @@ class SimplePayloadGroundStation:
         try:
             # Decode base64 image
             img_bytes = base64.b64decode(image_data.encode('utf-8'))
+            
+            # Add GPS EXIF metadata if location data is available
+            if location_data and \
+            all(location_data.get(k) is not None for k in ['lat', 'lon', 'alt']):
+                lat = float(location_data['lat'])
+                lon = float(location_data['lon']) 
+                alt = float(location_data['alt'])
+                # Create GPS EXIF data
+                gps_dict = {
+                    piexif.GPSIFD.GPSVersionID: (2, 0, 0, 0),
+                    piexif.GPSIFD.GPSLatitudeRef: 'N' if lat >= 0 else 'S',
+                    piexif.GPSIFD.GPSLatitude: self._decimal_to_dms(lat),
+                    piexif.GPSIFD.GPSLongitudeRef: 'E' if lon >= 0 else 'W',
+                    piexif.GPSIFD.GPSLongitude: self._decimal_to_dms(lon),
+                    piexif.GPSIFD.GPSAltitudeRef: 0, # Above sea level
+                    piexif.GPSIFD.GPSAltitude: (int(abs(alt) * 100), 100), # Altitude in centimeters
+                }
+                exif_dict = {"GPS": gps_dict}
+                exif_bytes = piexif.dump(exif_dict)
+                # Insert EXIF into image
+                img_bytes = piexif.insert(exif_bytes, img_bytes)
+                self._logger.debug(
+                    f"Added GPS metadata: lat={lat}, lon={lon}, alt={alt}"
+                )
+            
             # Create filename
             clean_timestamp = timestamp.replace(':', '-').replace('.', '_')
             filename = f"detection_{clean_timestamp}.jpg"
             filepath = os.path.join(self.image_save_dir, filename)
+
             # Save image
             with open(filepath, 'wb') as f:
                 f.write(img_bytes)
@@ -229,13 +283,13 @@ class SimplePayloadGroundStation:
                     continue
                 
                 # Extract message components
-                timestamp = message.get('timestamp', 'unknown')
                 detections_data = message.get('detections', [])
+                image_data = message.get('image')
                 location_data = message.get(
                     'location', 
                     {'lat': None, 'lon': None, 'alt': None}
                 )
-                image_data = message.get('image')
+                timestamp = message.get('timestamp', 'unknown')
                 
                 # Log detection information
                 for detection in detections_data:
@@ -253,7 +307,11 @@ class SimplePayloadGroundStation:
                 # Save image if requested
                 if image_data:
                     if self.save_images:
-                        saved_path = self._save_image(image_data, timestamp)
+                        saved_path = self._save_image(
+                            image_data, 
+                            timestamp, 
+                            location_data
+                        )
                         if saved_path:
                             self._logger.debug(f"Saved image to: {saved_path}")
                 else:
