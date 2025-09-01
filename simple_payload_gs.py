@@ -141,6 +141,15 @@ class SimplePayloadGroundStation:
             # Decode base64 image
             img_bytes = base64.b64decode(image_data.encode('utf-8'))
             
+            # Create filename
+            clean_timestamp = timestamp.replace(':', '-').replace('.', '_')
+            filename = f"detection_{clean_timestamp}.jpg"
+            filepath = os.path.join(self.image_save_dir, filename)
+
+            # Save image first
+            with open(filepath, 'wb') as f:
+                f.write(img_bytes)
+            
             # Add GPS EXIF metadata if location data is available
             if location_data and \
             all(location_data.get(k) is not None for k in ['lat', 'lon', 'alt']):
@@ -159,20 +168,11 @@ class SimplePayloadGroundStation:
                 }
                 exif_dict = {"GPS": gps_dict}
                 exif_bytes = piexif.dump(exif_dict)
-                # Insert EXIF into image bytes
-                img_bytes = piexif.insert(exif_bytes, img_bytes, img_bytes)
+                # Insert EXIF into saved file
+                piexif.insert(exif_bytes, filepath)
                 self._logger.debug(
                     f"Added GPS metadata: lat={lat}, lon={lon}, alt={alt}"
                 )
-            
-            # Create filename
-            clean_timestamp = timestamp.replace(':', '-').replace('.', '_')
-            filename = f"detection_{clean_timestamp}.jpg"
-            filepath = os.path.join(self.image_save_dir, filename)
-
-            # Save image
-            with open(filepath, 'wb') as f:
-                f.write(img_bytes)
 
             return filepath
         except Exception as e:
