@@ -159,8 +159,8 @@ class SimplePayloadGroundStation:
                 }
                 exif_dict = {"GPS": gps_dict}
                 exif_bytes = piexif.dump(exif_dict)
-                # Insert EXIF into image
-                img_bytes = piexif.insert(exif_bytes, img_bytes)
+                # Insert EXIF into image bytes
+                img_bytes = piexif.insert(exif_bytes, img_bytes, img_bytes)
                 self._logger.debug(
                     f"Added GPS metadata: lat={lat}, lon={lon}, alt={alt}"
                 )
