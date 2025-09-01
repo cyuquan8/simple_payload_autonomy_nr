@@ -163,8 +163,8 @@ class SimplePayloadGroundStation:
                     piexif.GPSIFD.GPSLatitude: self._decimal_to_dms(lat),
                     piexif.GPSIFD.GPSLongitudeRef: 'E' if lon >= 0 else 'W',
                     piexif.GPSIFD.GPSLongitude: self._decimal_to_dms(lon),
-                    piexif.GPSIFD.GPSAltitudeRef: 0, # Above sea level
-                    piexif.GPSIFD.GPSAltitude: (int(abs(alt) * 100), 100), # Altitude in centimeters
+                    piexif.GPSIFD.GPSAltitudeRef: 0 if alt >= 0 else 1, # 0=above, 1=below sea level
+                    piexif.GPSIFD.GPSAltitude: (int(abs(alt) * 100), 100), # Altitude in 2dp
                 }
                 exif_dict = {"GPS": gps_dict}
                 exif_bytes = piexif.dump(exif_dict)
