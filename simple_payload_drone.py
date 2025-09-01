@@ -718,9 +718,9 @@ class SimplePayloadDrone:
             self._logger.debug("Dequeued message from UDP queue")
             return message
         except queue.Empty:
-            self._logger.debug(
-                "No message available in UDP queue (timeout/empty)"
-            )
+            # self._logger.debug(
+            #     "No message available in UDP queue (timeout/empty)"
+            # )
             return None
         except Exception as e:
             self._logger.debug(f"Failed to dequeue message: {e}")
@@ -744,11 +744,13 @@ class SimplePayloadDrone:
             )
             self._logger.debug("Queued detection message for UDP publishing")
         except queue.Full:
-            self._logger.debug(
-                "Message queue is full, dropping detection message"
-            )
+            # self._logger.debug(
+            #     "Message queue is full, dropping detection message"
+            # )
+            return None
         except Exception as e:
             self._logger.debug(f"Failed to queue detection message: {e}")
+            return None
     
     def _enqueue_sentinel(self) -> None:
         """
@@ -1568,7 +1570,7 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--udp-image-quality",
-        default=85,
+        default=30,
         help=(
             "JPEG quality for UDP image transmission" 
             "(1-100, higher = better quality but larger size)"
