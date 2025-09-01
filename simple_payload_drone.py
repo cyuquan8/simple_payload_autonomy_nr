@@ -982,11 +982,16 @@ class SimplePayloadDrone:
         
         if self.debug_camera:
             self._start_camera_pitch_worker()
-        elif self.debug_detect or self.debug_detect_no_vech:
+        if self.debug_detect or self.debug_detect_no_vech:
             self._start_detection_worker()
-        elif self.debug_goto_waypoints:
+        if self.debug_goto_waypoints:
             self._start_goto_waypoints_worker()
-        else:
+        if not (
+            self.debug_camera or 
+            self.debug_detect or 
+            self.debug_detect_no_vech or 
+            self.debug_goto_waypoints
+        ):
             self._start_camera_pitch_worker()
             self._start_detection_worker()
             self._start_goto_waypoints_worker()
@@ -1554,13 +1559,13 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--udp-ip",
-        default="192.168.0.109",
+        default="10.5.0.1",
         help="UDP IP Address",
         type=str
     )
     parser.add_argument(
         "--udp-port",
-        default=14550,
+        default=5602,
         help="UDP Port",
         type=int
     )
