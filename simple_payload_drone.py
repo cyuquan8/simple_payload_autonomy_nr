@@ -152,6 +152,8 @@ class SimplePayloadDrone:
         self.max_detections = args.max_detections
         self.threshold = args.threshold
         self.vflip = args.vflip
+        # Drone parameters
+        self.drone_id = args.drone_id
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
         self.wpt_json_filename = args.wpt_json_filename
@@ -605,49 +607,71 @@ class SimplePayloadDrone:
         ) -> list[LocationGlobalRelative] | None:
         """
         Parse coordinate data from a JSON file into LocationGlobalRelative 
-        objects.
+        objects for the current drone.
         
-        Reads a JSON file containing waypoint data with lat/lon/alt coordinates
-        and converts them into DroneKit LocationGlobalRelative objects for
-        navigation use.
+        Reads a JSON file containing waypoint data organized by drone_id with 
+        lat/lon/alt coordinates and converts them into DroneKit 
+        LocationGlobalRelative objects for navigation use.
         
         Args:
             filepath: Path to the JSON file containing waypoint data
         
         Returns:
             list[LocationGlobalRelative] | None: List of waypoint objects if 
-                successful, None if file not found, invalid JSON, or other 
-                errors occur
+                successful, None if file not found, invalid JSON, drone_id not 
+                found, or other errors occur
         
         Raises:
             None: All exceptions are caught and logged, returning None on 
                 failure
         
         Expected JSON format:
-            [
-                {"lat": float, "lon": float, "alt": float},
-                {"lat": float, "lon": float, "alt": float},
-                ...
-            ]
+            {
+                "drone_0": [
+                    {"lat": float, "lon": float, "alt": float},
+                    {"lat": float, "lon": float, "alt": float},
+                    ...
+                ],
+                "drone_1": [...]
+            }
         """
         try:
             waypoint_objects: list[LocationGlobalRelative] = []
             with open(filepath, 'r') as file:
                 data = json.load(file)
-            # Validate data structure - must be a list of waypoint dictionaries
-            if not isinstance(data, list):
+            # Validate data structure - must be a dict with drone_id keys
+            if not isinstance(data, dict):
                 self._logger.error(
-                    f"Invalid JSON structure in {filepath}: expected list, "
+                    f"Invalid JSON structure in {filepath}: expected dict, "
                     f"got {type(data).__name__}"
                 )
                 return None
             
+            # Check if current drone_id exists in the data
+            if self.drone_id not in data:
+                self._logger.error(
+                    f"Drone ID '{self.drone_id}' not found in {filepath}. "
+                    f"Available drone IDs: {list(data.keys())}"
+                )
+                return None
+            
+            # Get waypoint list for current drone
+            drone_waypoints = data[self.drone_id]
+            if not isinstance(drone_waypoints, list):
+                self._logger.error(
+                    f"Invalid waypoint data for drone '{self.drone_id}' in "
+                    f"{filepath}: expected list, got "
+                    f"{type(drone_waypoints).__name__}"
+                )
+                return None
+            
             # Parse each waypoint dictionary into LocationGlobalRelative object
-            for i, waypoint_data in enumerate(data):
+            for i, waypoint_data in enumerate(drone_waypoints):
                 if not isinstance(waypoint_data, dict):
                     self._logger.error(
-                        f"Invalid waypoint at index {i} in {filepath}: "
-                        f"expected dict, got {type(waypoint_data).__name__}"
+                        f"Invalid waypoint at index {i} for drone "
+                        f"'{self.drone_id}' in {filepath}: expected dict, got "
+                        f"{type(waypoint_data).__name__}"
                     )
                     return None
                 # Validate required keys
@@ -656,31 +680,43 @@ class SimplePayloadDrone:
                     missing_keys = required_keys - waypoint_data.keys()
                     self._logger.error(
                         f"Missing required keys {missing_keys} in waypoint "
-                        f"{i} from {filepath}"
+                        f"{i} for drone '{self.drone_id}' from {filepath}"
                     )
                     return None
                 try:
-                    waypoint = LocationGlobalRelative(
-                        float(waypoint_data['lat']), 
-                        float(waypoint_data['lon']), 
-                        float(waypoint_data['alt'])
-                    )
+                    lat = float(waypoint_data['lat'])
+                    lon = float(waypoint_data['lon'])
+                    alt = float(waypoint_data['alt'])
+                    # Validate latitude range (-90 to 90)
+                    if not (-90.0 <= lat <= 90.0):
+                        raise ValueError(
+                            f"Invalid latitude {lat}: must be between "
+                            f"-90 and 90 degrees"
+                        )
+                    # Validate longitude range (-180 to 180)
+                    if not (-180.0 <= lon <= 180.0):
+                        raise ValueError(
+                            f"Invalid longitude {lon}: must be between "
+                            f"-180 and 180 degrees"
+                        )
+                    waypoint = LocationGlobalRelative(lat, lon, alt)
                     waypoint_objects.append(waypoint)
                 except (ValueError, TypeError) as e:
                     self._logger.error(
-                        f"Invalid coordinate values in waypoint {i} "
-                        f"from {filepath}: {e}"
+                        f"Invalid coordinate values in waypoint {i} for drone "
+                        f"'{self.drone_id}' from {filepath}: {e}"
                     )
                     return None
             
             if not waypoint_objects:
                 self._logger.warning(
-                    f"No valid waypoints parsed from {filepath}"
+                    f"No valid waypoints parsed for drone '{self.drone_id}' "
+                    f"from {filepath}"
                 )
                 return None
             self._logger.info(
-                f"Successfully parsed {len(waypoint_objects)} waypoints "
-                f"from {filepath}"
+                f"Successfully parsed {len(waypoint_objects)} waypoints for "
+                f"drone '{self.drone_id}' from {filepath}"
             )
 
             return waypoint_objects
@@ -1400,14 +1436,6 @@ def get_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description="Simple Payload Drone")
     
-    # Camera
-    parser.add_argument(
-        "--buffer-count",
-        default=12,
-        help="Frames captured and stored before processing",
-        type=int,
-    )
-    
     # Debug
     parser.add_argument(
         "--debug-camera",
@@ -1555,6 +1583,14 @@ def get_args() -> argparse.Namespace:
         help="Use default intrinsics parameters"
     )
     
+    # Camera parameters
+    parser.add_argument(
+        "--buffer-count",
+        default=12,
+        help="Frames captured and stored before processing",
+        type=int,
+    )
+
     # Comms parameters
     parser.add_argument(
         "--rpi-baud-rate",
@@ -1657,6 +1693,14 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True, 
         help="Whether to flip input image over vertical plane"
+    )
+
+    # Drone parameters
+    parser.add_argument(
+        "--drone-id",
+        default="drone_0",
+        help="Drone identification string",
+        type=str
     )
 
     # Waypoint parameters
