@@ -705,12 +705,12 @@ class SimplePayloadDrone:
             self._logger.debug("Dequeued message from UDP queue")
             return message
         except queue.Empty:
-            self._logger.warning(
+            self._logger.debug(
                 "No message available in UDP queue (timeout/empty)"
             )
             return None
         except Exception as e:
-            self._logger.error(f"Failed to dequeue message: {e}")
+            self._logger.debug(f"Failed to dequeue message: {e}")
             return None
 
     def _enqueue_message(self, message: bytes) -> None:
@@ -731,11 +731,11 @@ class SimplePayloadDrone:
             )
             self._logger.debug("Queued detection message for UDP publishing")
         except queue.Full:
-            self._logger.warning(
+            self._logger.debug(
                 "Message queue is full, dropping detection message"
             )
         except Exception as e:
-            self._logger.error(f"Failed to queue detection message: {e}")
+            self._logger.debug(f"Failed to queue detection message: {e}")
     
     def _enqueue_sentinel(self) -> None:
         """
@@ -748,7 +748,11 @@ class SimplePayloadDrone:
             None
         """
         # Always block indefinitely for sentinel to ensure shutdown happens
+        self._logger.debug(
+            "Queueing sentinel object to signal UDP worker shutdown"
+        )
         self._message_queue.put(self._sentinel, block=True, timeout=None)
+        self._logger.debug("Queued sentinel object for UDP worker shutdown")
 
     ################################
     ### Vehicle helper functions ###
