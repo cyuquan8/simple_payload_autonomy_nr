@@ -648,9 +648,9 @@ class SimplePayloadDrone:
                     return None
                 try:
                     waypoint = LocationGlobalRelative(
-                        latitude=float(waypoint_data['lat']), 
-                        longitude=float(waypoint_data['lon']), 
-                        altitude=float(waypoint_data['alt'])
+                        float(waypoint_data['lat']), 
+                        float(waypoint_data['lon']), 
+                        float(waypoint_data['alt'])
                     )
                     waypoint_objects.append(waypoint)
                 except (ValueError, TypeError) as e:
