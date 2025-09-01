@@ -115,10 +115,10 @@ class SimplePayloadGroundStation:
         try:
             return json.loads(data.decode('utf-8'))
         except json.JSONDecodeError as e:
-            self._logger.error(f"Failed to decode JSON message: {e}")
+            # self._logger.debug(f"Failed to decode JSON message: {e}")
             return None
         except UnicodeDecodeError as e:
-            self._logger.error(f"Failed to decode UTF-8 data: {e}")
+            # self._logger.debug(f"Failed to decode UTF-8 data: {e}")
             return None
     
     def _save_image(self, 
