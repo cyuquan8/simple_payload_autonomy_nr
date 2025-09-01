@@ -1064,7 +1064,7 @@ class SimplePayloadDrone:
                 pitch = math.degrees(self._vehicle.attitude.pitch)
                 self._logger.debug(f"Pitch: {pitch:.2f} degrees")
                 # Compensate
-                servo_angle = self.base_angle - pitch  
+                servo_angle = self.base_angle + pitch
                 # Limit servo movement
                 servo_angle = max(min(servo_angle, 90), 0)
                 # Convert angle to duty cycle
