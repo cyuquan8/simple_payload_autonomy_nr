@@ -9,4 +9,4 @@ sleep 30
 
 # Run with venv python directly (no need for activate)
 # Simple payload drone
-sudo venv/bin/python simple_drone_payload.py --detect-classes 0 2 4 7
+sudo venv/bin/python simple_payload_drone.py --detect-classes 0 2 4 7
