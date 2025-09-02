@@ -143,7 +143,7 @@ class SimplePayloadGroundStation:
             
             # Create filename
             clean_timestamp = timestamp.replace(':', '-').replace('.', '_')
-            filename = f"detection_{clean_timestamp}.jpg"
+            filename = f"{clean_timestamp}.jpg"
             filepath = os.path.join(self.image_save_dir, filename)
 
             # Save image first
