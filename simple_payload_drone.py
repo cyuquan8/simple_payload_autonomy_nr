@@ -140,7 +140,7 @@ class SimplePayloadDrone:
         # Debug parameters
         self.debug_camera = args.debug_camera
         self.debug_detect = args.debug_detect
-        self.debug_detect_no_vech = args.debug_detect_no_vech
+        self.debug_detect_no_vehicle = args.debug_detect_no_vehicle
         self.debug_goto_waypoints = args.debug_goto_waypoints
         self.debug_rtl = args.debug_rtl
         self.debug_takeoff = args.debug_takeoff
@@ -192,7 +192,7 @@ class SimplePayloadDrone:
         self._start_event = threading.Event()
         
         # Setup comms
-        if not args.debug_detect_no_vech:
+        if not args.debug_detect_no_vehicle:
             self._vehicle=connect(
                 self.rpi_serial_port, 
                 wait_ready=True, 
@@ -1153,7 +1153,7 @@ class SimplePayloadDrone:
         
         if self.debug_camera:
             self._start_camera_pitch_worker()
-        if self.debug_detect or self.debug_detect_no_vech:
+        if self.debug_detect or self.debug_detect_no_vehicle:
             self._start_detection_worker()
         if self.debug_goto_waypoints:
             self._start_goto_waypoints_worker()
@@ -1164,7 +1164,7 @@ class SimplePayloadDrone:
         if not (
             self.debug_camera or 
             self.debug_detect or 
-            self.debug_detect_no_vech or 
+            self.debug_detect_no_vehicle or 
             self.debug_goto_waypoints or
             self.debug_rtl or
             self.debug_takeoff
@@ -1524,7 +1524,7 @@ class SimplePayloadDrone:
             self._logger.info("Running in camera-control-only mode")
         elif self.debug_detect:
             self._logger.info("Running in detection-only mode with vehicle")
-        elif self.debug_detect_no_vech:
+        elif self.debug_detect_no_vehicle:
             self._logger.info("Running in detection-only mode without vehicle")
         elif self.debug_goto_waypoints:
             self._logger.info("Running in goto-waypoints-only mode")
@@ -1601,7 +1601,7 @@ def get_args() -> argparse.Namespace:
         help="Runs detection only with vehicle connection for location"
     )
     parser.add_argument(
-        "--debug-detect-no-vech",
+        "--debug-detect-no-vehicle",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs detection only without vehicle connection (no location)"
