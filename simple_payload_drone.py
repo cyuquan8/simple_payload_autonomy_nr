@@ -142,6 +142,8 @@ class SimplePayloadDrone:
         self.debug_detect = args.debug_detect
         self.debug_detect_no_vech = args.debug_detect_no_vech
         self.debug_goto_waypoints = args.debug_goto_waypoints
+        self.debug_rtl = args.debug_rtl
+        self.debug_takeoff = args.debug_takeoff
         # Detection parameters
         self.detect_classes = args.detect_classes
         if len(self.detect_classes) == 0:
@@ -174,6 +176,12 @@ class SimplePayloadDrone:
         # Goto waypoints thread
         self._goto_waypoints_thread = None
         self._goto_waypoints_active = False
+        # Return to launch worker thread
+        self._return_to_launch_thread = None
+        self._return_to_launch_active = False
+        # Takeoff worker thread
+        self._takeoff_thread = None
+        self._takeoff_active = False
         # UDP publishing worker thread 
         self._message_queue = queue.Queue(maxsize=args.udp_queue_maxsize)
         self._udp_thread = None
@@ -991,6 +999,100 @@ class SimplePayloadDrone:
                 self._logger.info("Goto waypoints worker thread stopped")
             self._goto_waypoints_thread = None
 
+    def _start_return_to_launch_worker(self) -> None:
+        """
+        Start the return to launch worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If return to launch worker is already started
+        """
+        if self._return_to_launch_thread is not None:
+            raise RuntimeError("Return to launch worker already started")
+        
+        self._return_to_launch_active = True
+        self._return_to_launch_thread = threading.Thread(
+            target=self._return_to_launch_worker,
+            daemon=True,
+            name="Return-To-Launch-Worker"
+        )
+        self._return_to_launch_thread.start()
+        self._logger.info("Started return to launch worker thread")
+
+    def _stop_return_to_launch_worker(self) -> None:
+        """
+        Stop the return to launch worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._return_to_launch_thread is not None:
+            self._logger.info("Stopping return to launch worker...")
+            self._return_to_launch_active = False
+            self._return_to_launch_thread.join(timeout=5.0)
+            if self._return_to_launch_thread.is_alive():
+                self._logger.warning(
+                    "Return to launch worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Return to launch worker thread stopped")
+            self._return_to_launch_thread = None
+
+    def _start_takeoff_worker(self) -> None:
+        """
+        Start the takeoff worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If takeoff worker is already started
+        """
+        if self._takeoff_thread is not None:
+            raise RuntimeError("Takeoff worker already started")
+        
+        self._takeoff_active = True
+        self._takeoff_thread = threading.Thread(
+            target=self._takeoff_worker,
+            daemon=True,
+            name="Takeoff-Worker"
+        )
+        self._takeoff_thread.start()
+        self._logger.info("Started takeoff worker thread")
+
+    def _stop_takeoff_worker(self) -> None:
+        """
+        Stop the takeoff worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._takeoff_thread is not None:
+            self._logger.info("Stopping takeoff worker...")
+            self._takeoff_active = False
+            self._takeoff_thread.join(timeout=5.0)
+            if self._takeoff_thread.is_alive():
+                self._logger.warning(
+                    "Takeoff worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Takeoff worker thread stopped")
+            self._takeoff_thread = None
+
     def _start_udp_publisher(self) -> None:
         """
         Start the UDP publisher thread.
@@ -1055,15 +1157,23 @@ class SimplePayloadDrone:
             self._start_detection_worker()
         if self.debug_goto_waypoints:
             self._start_goto_waypoints_worker()
+        if self.debug_rtl:
+            self._start_return_to_launch_worker()
+        if self.debug_takeoff:
+            self._start_takeoff_worker()
         if not (
             self.debug_camera or 
             self.debug_detect or 
             self.debug_detect_no_vech or 
-            self.debug_goto_waypoints
+            self.debug_goto_waypoints or
+            self.debug_rtl or
+            self.debug_takeoff
         ):
             self._start_camera_pitch_worker()
             self._start_detection_worker()
             self._start_goto_waypoints_worker()
+            self._start_return_to_launch_worker()
+            self._start_takeoff_worker()
         
         if self.udp_pub:
             self._start_udp_publisher()
@@ -1082,19 +1192,16 @@ class SimplePayloadDrone:
         """
         self._logger.info("Stopping threads...")
         
-        # Stop camera pitch worker if running
         if self._camera_pitch_thread is not None:
             self._stop_camera_pitch_worker()
-        
-        # Stop detection worker if running
         if self._detection_thread is not None:
             self._stop_detection_worker()
-        
-        # Stop goto waypoints worker if running
         if self._goto_waypoints_thread is not None:
             self._stop_goto_waypoints_worker()
-
-        # Stop UDP publisher if running
+        if self._return_to_launch_thread is not None:
+            self._stop_return_to_launch_worker()
+        if self._takeoff_thread is not None:
+            self._stop_takeoff_worker()
         if self._udp_thread is not None:
             self._stop_udp_publisher()
         
@@ -1303,6 +1410,32 @@ class SimplePayloadDrone:
             self._goto_waypoints_active = False
         self._logger.info("Goto waypoints worker stopped")
 
+    def _return_to_launch_worker(self) -> None:
+        """
+        Worker thread function to handle return to launch operations.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        # TODO: Implement return to launch worker functionality
+        pass
+
+    def _takeoff_worker(self) -> None:
+        """
+        Worker thread function to handle takeoff operations.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        # TODO: Implement takeoff worker functionality
+        pass
+
     def _udp_publisher_worker(self) -> None:
         """
         Worker thread function to process message queue and send UDP messages.
@@ -1395,6 +1528,10 @@ class SimplePayloadDrone:
             self._logger.info("Running in detection-only mode without vehicle")
         elif self.debug_goto_waypoints:
             self._logger.info("Running in goto-waypoints-only mode")
+        elif self.debug_rtl:
+            self._logger.info("Running in return-to-launch-only mode")
+        elif self.debug_takeoff:
+            self._logger.info("Running in takeoff-only mode")
         else:
             self._logger.info("Running in default mode")
         
@@ -1474,6 +1611,18 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs go to waypoints only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-rtl",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs return to launch only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-takeoff",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs takeoff only with vehicle connection"
     )
     parser.add_argument(
         "--show-preview",
