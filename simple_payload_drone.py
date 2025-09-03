@@ -533,16 +533,22 @@ class SimplePayloadDrone:
         dlong = aLocation2.lon - aLocation1.lon
         return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
     
-    def _goto_waypoint(self, targetLocation: LocationGlobalRelative) -> None:
+    def _goto_waypoint(
+            self, 
+            targetLocation: LocationGlobalRelative, 
+            groundspeed: float = 5
+        ) -> None:
         """
         Navigate vehicle to a specific waypoint using DroneKit simple_goto.
         
-        Commands the vehicle to navigate to the specified target location and
-        monitors progress until the waypoint is reached or the vehicle exits
-        GUIDED mode. Uses a distance-based approach to determine arrival.
+        Commands the vehicle to navigate to the specified target location at
+        the specified groundspeed and monitors progress until the waypoint is 
+        reached or the vehicle exits GUIDED mode. Uses a distance-based approach 
+        to determine arrival.
         
         Args:
             targetLocation: Target waypoint as LocationGlobalRelative object
+            groundspeed: Desired groundspeed in m/s for navigation (default: 5)
             
         Returns:
             None
@@ -566,9 +572,11 @@ class SimplePayloadDrone:
             currentLocation, 
             targetLocation
         )
-        # Command vehicle to navigate to target
-        self._vehicle.simple_goto(targetLocation)
-        self._logger.info(f"Going to target location {targetLocation}")
+        # Command vehicle to navigate to target with specified groundspeed
+        self._vehicle.simple_goto(targetLocation, groundspeed=groundspeed)
+        self._logger.info(
+            f"Going to target location {targetLocation} at {groundspeed} m/s"
+        )
 
         # Monitor progress until arrival or shutdown
         while self._goto_waypoints_active and not self._shutdown_event.is_set():
@@ -604,22 +612,22 @@ class SimplePayloadDrone:
     def _parse_json_to_waypoints(
             self, 
             filepath: str
-        ) -> list[LocationGlobalRelative] | None:
+        ) -> list[tuple[LocationGlobalRelative, float]] | None:
         """
         Parse coordinate data from a JSON file into LocationGlobalRelative 
-        objects for the current drone.
+        objects with speeds for the current drone.
         
         Reads a JSON file containing waypoint data organized by drone_id with 
-        lat/lon/alt coordinates and converts them into DroneKit 
-        LocationGlobalRelative objects for navigation use.
+        lat/lon/alt/spd coordinates and converts them into tuples of DroneKit 
+        LocationGlobalRelative objects and speeds for navigation use.
         
         Args:
             filepath: Path to the JSON file containing waypoint data
         
         Returns:
-            list[LocationGlobalRelative] | None: List of waypoint objects if 
-                successful, None if file not found, invalid JSON, drone_id not 
-                found, or other errors occur
+            list[tuple[LocationGlobalRelative, float]] | None: List of 
+                (waypoint, speed) tuples if successful, None if file not found, 
+                invalid JSON, drone_id not found, or other errors occur
         
         Raises:
             None: All exceptions are caught and logged, returning None on 
@@ -628,15 +636,15 @@ class SimplePayloadDrone:
         Expected JSON format:
             {
                 "drone_0": [
-                    {"lat": float, "lon": float, "alt": float},
-                    {"lat": float, "lon": float, "alt": float},
+                    {"lat": float, "lon": float, "alt": float, "spd": float},
+                    {"lat": float, "lon": float, "alt": float, "spd": float},
                     ...
                 ],
                 "drone_1": [...]
             }
         """
         try:
-            waypoint_objects: list[LocationGlobalRelative] = []
+            waypoint_objects: list[tuple[LocationGlobalRelative, float]] = []
             with open(filepath, 'r') as file:
                 data = json.load(file)
             # Validate data structure - must be a dict with drone_id keys
@@ -675,7 +683,7 @@ class SimplePayloadDrone:
                     )
                     return None
                 # Validate required keys
-                required_keys = {'lat', 'lon', 'alt'}
+                required_keys = {'lat', 'lon', 'alt', 'spd'}
                 if not required_keys.issubset(waypoint_data.keys()):
                     missing_keys = required_keys - waypoint_data.keys()
                     self._logger.error(
@@ -687,6 +695,7 @@ class SimplePayloadDrone:
                     lat = float(waypoint_data['lat'])
                     lon = float(waypoint_data['lon'])
                     alt = float(waypoint_data['alt'])
+                    spd = float(waypoint_data['spd'])
                     # Validate latitude range (-90 to 90)
                     if not (-90.0 <= lat <= 90.0):
                         raise ValueError(
@@ -699,8 +708,13 @@ class SimplePayloadDrone:
                             f"Invalid longitude {lon}: must be between "
                             f"-180 and 180 degrees"
                         )
+                    # Validate speed (must be positive)
+                    if spd <= 0:
+                        raise ValueError(
+                            f"Invalid speed {spd}: must be positive"
+                        )
                     waypoint = LocationGlobalRelative(lat, lon, alt)
-                    waypoint_objects.append(waypoint)
+                    waypoint_objects.append((waypoint, spd))
                 except (ValueError, TypeError) as e:
                     self._logger.error(
                         f"Invalid coordinate values in waypoint {i} for drone "
@@ -1247,7 +1261,7 @@ class SimplePayloadDrone:
         self._logger.info(
             f"Starting navigation through {len(self._wpt_goto_list)} waypoints"
         )
-        for i, wp in enumerate(self._wpt_goto_list):
+        for i, (wp, speed) in enumerate(self._wpt_goto_list):
             # Check for shutdown between waypoints
             if not self._goto_waypoints_active or self._shutdown_event.is_set():
                 self._logger.info(f"Navigation interrupted at waypoint {i+1}")
@@ -1255,9 +1269,9 @@ class SimplePayloadDrone:
             try:
                 self._logger.info(
                     f"Navigating to waypoint {i+1}/{len(self._wpt_goto_list)}: "
-                    f"{wp}"
+                    f"{wp} at {speed} m/s"
                 )
-                self._goto_waypoint(wp)
+                self._goto_waypoint(wp, speed)
                 self._logger.info(
                     f"Reached waypoint {i+1}/{len(self._wpt_goto_list)}"
                 )
