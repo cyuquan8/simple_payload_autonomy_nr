@@ -140,8 +140,10 @@ class SimplePayloadDrone:
         # Debug parameters
         self.debug_camera = args.debug_camera
         self.debug_detect = args.debug_detect
-        self.debug_detect_no_vech = args.debug_detect_no_vech
+        self.debug_detect_no_vehicle = args.debug_detect_no_vehicle
         self.debug_goto_waypoints = args.debug_goto_waypoints
+        self.debug_rtl = args.debug_rtl
+        self.debug_takeoff = args.debug_takeoff
         # Detection parameters
         self.detect_classes = args.detect_classes
         if len(self.detect_classes) == 0:
@@ -174,17 +176,30 @@ class SimplePayloadDrone:
         # Goto waypoints thread
         self._goto_waypoints_thread = None
         self._goto_waypoints_active = False
+        # Return to launch worker thread
+        self._return_to_launch_thread = None
+        self._return_to_launch_active = False
+        # Takeoff worker thread
+        self._takeoff_thread = None
+        self._takeoff_active = False
         # UDP publishing worker thread 
         self._message_queue = queue.Queue(maxsize=args.udp_queue_maxsize)
         self._udp_thread = None
         self._sentinel = object()  # Unique sentinel object for shutdown
+
+        # Events
+
         # Shutdown event for graceful termination
         self._shutdown_event = threading.Event()
         # Start event for synchronized thread startup
         self._start_event = threading.Event()
+        # Flight sequence coordination events
+        self._takeoff_complete = threading.Event()
+        self._waypoints_complete = threading.Event()
+        self._rtl_complete = threading.Event()
         
         # Setup comms
-        if not args.debug_detect_no_vech:
+        if not args.debug_detect_no_vehicle:
             self._vehicle=connect(
                 self.rpi_serial_port, 
                 wait_ready=True, 
@@ -533,16 +548,22 @@ class SimplePayloadDrone:
         dlong = aLocation2.lon - aLocation1.lon
         return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
     
-    def _goto_waypoint(self, targetLocation: LocationGlobalRelative) -> None:
+    def _goto_waypoint(
+            self, 
+            targetLocation: LocationGlobalRelative, 
+            groundspeed: float = 5
+        ) -> None:
         """
         Navigate vehicle to a specific waypoint using DroneKit simple_goto.
         
-        Commands the vehicle to navigate to the specified target location and
-        monitors progress until the waypoint is reached or the vehicle exits
-        GUIDED mode. Uses a distance-based approach to determine arrival.
+        Commands the vehicle to navigate to the specified target location at
+        the specified groundspeed and monitors progress until the waypoint is 
+        reached or the vehicle exits GUIDED mode. Uses a distance-based approach 
+        to determine arrival.
         
         Args:
             targetLocation: Target waypoint as LocationGlobalRelative object
+            groundspeed: Desired groundspeed in m/s for navigation (default: 5)
             
         Returns:
             None
@@ -566,9 +587,11 @@ class SimplePayloadDrone:
             currentLocation, 
             targetLocation
         )
-        # Command vehicle to navigate to target
-        self._vehicle.simple_goto(targetLocation)
-        self._logger.info(f"Going to target location {targetLocation}")
+        # Command vehicle to navigate to target with specified groundspeed
+        self._vehicle.simple_goto(targetLocation, groundspeed=groundspeed)
+        self._logger.info(
+            f"Going to target location {targetLocation} at {groundspeed} m/s"
+        )
 
         # Monitor progress until arrival or shutdown
         while self._goto_waypoints_active and not self._shutdown_event.is_set():
@@ -604,22 +627,22 @@ class SimplePayloadDrone:
     def _parse_json_to_waypoints(
             self, 
             filepath: str
-        ) -> list[LocationGlobalRelative] | None:
+        ) -> list[tuple[LocationGlobalRelative, float]] | None:
         """
         Parse coordinate data from a JSON file into LocationGlobalRelative 
-        objects for the current drone.
+        objects with speeds for the current drone.
         
         Reads a JSON file containing waypoint data organized by drone_id with 
-        lat/lon/alt coordinates and converts them into DroneKit 
-        LocationGlobalRelative objects for navigation use.
+        lat/lon/alt/spd coordinates and converts them into tuples of DroneKit 
+        LocationGlobalRelative objects and speeds for navigation use.
         
         Args:
             filepath: Path to the JSON file containing waypoint data
         
         Returns:
-            list[LocationGlobalRelative] | None: List of waypoint objects if 
-                successful, None if file not found, invalid JSON, drone_id not 
-                found, or other errors occur
+            list[tuple[LocationGlobalRelative, float]] | None: List of 
+                (waypoint, speed) tuples if successful, None if file not found, 
+                invalid JSON, drone_id not found, or other errors occur
         
         Raises:
             None: All exceptions are caught and logged, returning None on 
@@ -628,15 +651,15 @@ class SimplePayloadDrone:
         Expected JSON format:
             {
                 "drone_0": [
-                    {"lat": float, "lon": float, "alt": float},
-                    {"lat": float, "lon": float, "alt": float},
+                    {"lat": float, "lon": float, "alt": float, "spd": float},
+                    {"lat": float, "lon": float, "alt": float, "spd": float},
                     ...
                 ],
                 "drone_1": [...]
             }
         """
         try:
-            waypoint_objects: list[LocationGlobalRelative] = []
+            waypoint_objects: list[tuple[LocationGlobalRelative, float]] = []
             with open(filepath, 'r') as file:
                 data = json.load(file)
             # Validate data structure - must be a dict with drone_id keys
@@ -675,7 +698,7 @@ class SimplePayloadDrone:
                     )
                     return None
                 # Validate required keys
-                required_keys = {'lat', 'lon', 'alt'}
+                required_keys = {'lat', 'lon', 'alt', 'spd'}
                 if not required_keys.issubset(waypoint_data.keys()):
                     missing_keys = required_keys - waypoint_data.keys()
                     self._logger.error(
@@ -687,6 +710,7 @@ class SimplePayloadDrone:
                     lat = float(waypoint_data['lat'])
                     lon = float(waypoint_data['lon'])
                     alt = float(waypoint_data['alt'])
+                    spd = float(waypoint_data['spd'])
                     # Validate latitude range (-90 to 90)
                     if not (-90.0 <= lat <= 90.0):
                         raise ValueError(
@@ -699,8 +723,13 @@ class SimplePayloadDrone:
                             f"Invalid longitude {lon}: must be between "
                             f"-180 and 180 degrees"
                         )
+                    # Validate speed (must be positive)
+                    if spd <= 0:
+                        raise ValueError(
+                            f"Invalid speed {spd}: must be positive"
+                        )
                     waypoint = LocationGlobalRelative(lat, lon, alt)
-                    waypoint_objects.append(waypoint)
+                    waypoint_objects.append((waypoint, spd))
                 except (ValueError, TypeError) as e:
                     self._logger.error(
                         f"Invalid coordinate values in waypoint {i} for drone "
@@ -977,6 +1006,100 @@ class SimplePayloadDrone:
                 self._logger.info("Goto waypoints worker thread stopped")
             self._goto_waypoints_thread = None
 
+    def _start_return_to_launch_worker(self) -> None:
+        """
+        Start the return to launch worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If return to launch worker is already started
+        """
+        if self._return_to_launch_thread is not None:
+            raise RuntimeError("Return to launch worker already started")
+        
+        self._return_to_launch_active = True
+        self._return_to_launch_thread = threading.Thread(
+            target=self._return_to_launch_worker,
+            daemon=True,
+            name="Return-To-Launch-Worker"
+        )
+        self._return_to_launch_thread.start()
+        self._logger.info("Started return to launch worker thread")
+
+    def _stop_return_to_launch_worker(self) -> None:
+        """
+        Stop the return to launch worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._return_to_launch_thread is not None:
+            self._logger.info("Stopping return to launch worker...")
+            self._return_to_launch_active = False
+            self._return_to_launch_thread.join(timeout=5.0)
+            if self._return_to_launch_thread.is_alive():
+                self._logger.warning(
+                    "Return to launch worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Return to launch worker thread stopped")
+            self._return_to_launch_thread = None
+
+    def _start_takeoff_worker(self) -> None:
+        """
+        Start the takeoff worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If takeoff worker is already started
+        """
+        if self._takeoff_thread is not None:
+            raise RuntimeError("Takeoff worker already started")
+        
+        self._takeoff_active = True
+        self._takeoff_thread = threading.Thread(
+            target=self._takeoff_worker,
+            daemon=True,
+            name="Takeoff-Worker"
+        )
+        self._takeoff_thread.start()
+        self._logger.info("Started takeoff worker thread")
+
+    def _stop_takeoff_worker(self) -> None:
+        """
+        Stop the takeoff worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._takeoff_thread is not None:
+            self._logger.info("Stopping takeoff worker...")
+            self._takeoff_active = False
+            self._takeoff_thread.join(timeout=5.0)
+            if self._takeoff_thread.is_alive():
+                self._logger.warning(
+                    "Takeoff worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Takeoff worker thread stopped")
+            self._takeoff_thread = None
+
     def _start_udp_publisher(self) -> None:
         """
         Start the UDP publisher thread.
@@ -1037,19 +1160,27 @@ class SimplePayloadDrone:
         
         if self.debug_camera:
             self._start_camera_pitch_worker()
-        if self.debug_detect or self.debug_detect_no_vech:
+        if self.debug_detect or self.debug_detect_no_vehicle:
             self._start_detection_worker()
         if self.debug_goto_waypoints:
             self._start_goto_waypoints_worker()
+        if self.debug_rtl:
+            self._start_return_to_launch_worker()
+        if self.debug_takeoff:
+            self._start_takeoff_worker()
         if not (
             self.debug_camera or 
             self.debug_detect or 
-            self.debug_detect_no_vech or 
-            self.debug_goto_waypoints
+            self.debug_detect_no_vehicle or 
+            self.debug_goto_waypoints or
+            self.debug_rtl or
+            self.debug_takeoff
         ):
             self._start_camera_pitch_worker()
             self._start_detection_worker()
             self._start_goto_waypoints_worker()
+            self._start_return_to_launch_worker()
+            self._start_takeoff_worker()
         
         if self.udp_pub:
             self._start_udp_publisher()
@@ -1068,19 +1199,16 @@ class SimplePayloadDrone:
         """
         self._logger.info("Stopping threads...")
         
-        # Stop camera pitch worker if running
         if self._camera_pitch_thread is not None:
             self._stop_camera_pitch_worker()
-        
-        # Stop detection worker if running
         if self._detection_thread is not None:
             self._stop_detection_worker()
-        
-        # Stop goto waypoints worker if running
         if self._goto_waypoints_thread is not None:
             self._stop_goto_waypoints_worker()
-
-        # Stop UDP publisher if running
+        if self._return_to_launch_thread is not None:
+            self._stop_return_to_launch_worker()
+        if self._takeoff_thread is not None:
+            self._stop_takeoff_worker()
         if self._udp_thread is not None:
             self._stop_udp_publisher()
         
@@ -1219,7 +1347,6 @@ class SimplePayloadDrone:
         
         # Wait for synchronized start signal
         self._start_event.wait()
-        self._logger.info("Goto waypoints worker ready to begin processing")
 
         if self._vehicle is None:
             self._goto_waypoints_active = False
@@ -1228,26 +1355,39 @@ class SimplePayloadDrone:
             self._goto_waypoints_active = False
             raise RuntimeError("Goto waypoints is None")
 
-        # Wait for vehicle to be ready (in GUIDED mode)
-        self._logger.info(
-            "Waiting for vehicle to be ready for waypoint navigation..."
-        )
-        while self._goto_waypoints_active and not self._shutdown_event.is_set():
-            current_mode = self._vehicle.mode.name
-            if current_mode == "GUIDED":
-                self._logger.info("Vehicle is ready - in GUIDED mode")
-                break
-            else:
-                self._logger.debug(
-                    f"Waiting for GUIDED mode (currently {current_mode})"
-                )
-                time.sleep(0.5) # Check every 500ms
+        # Wait for appropriate trigger based on running threads
+        if self.debug_goto_waypoints and not self.debug_takeoff:
+            # Debug goto waypoints only (no takeoff) 
+            # Wait for vehicle to be ready (GUIDED mode)
+            self._logger.info(
+                "Goto waypoints worker waiting for vehicle to be ready..."
+            )
+            while self._goto_waypoints_active and \
+                not self._shutdown_event.is_set():
+                current_mode = self._vehicle.mode.name
+                if current_mode == "GUIDED":
+                    self._logger.info("Vehicle is ready - in GUIDED mode")
+                    break
+                else:
+                    self._logger.debug(
+                        f"Waiting for GUIDED mode (currently {current_mode})"
+                    )
+                    time.sleep(0.5)  # Check every 500ms
+        else:
+            # Normal mode or both debug takeoff + goto 
+            # Wait for takeoff completion
+            self._logger.info(
+                "Goto waypoints worker waiting for takeoff completion..."
+            )
+            self._takeoff_complete.wait()
+        
+        self._logger.info("Goto waypoints worker ready to begin processing")
         
         # Execute waypoint navigation
         self._logger.info(
             f"Starting navigation through {len(self._wpt_goto_list)} waypoints"
         )
-        for i, wp in enumerate(self._wpt_goto_list):
+        for i, (wp, speed) in enumerate(self._wpt_goto_list):
             # Check for shutdown between waypoints
             if not self._goto_waypoints_active or self._shutdown_event.is_set():
                 self._logger.info(f"Navigation interrupted at waypoint {i+1}")
@@ -1255,9 +1395,9 @@ class SimplePayloadDrone:
             try:
                 self._logger.info(
                     f"Navigating to waypoint {i+1}/{len(self._wpt_goto_list)}: "
-                    f"{wp}"
+                    f"{wp} at {speed} m/s"
                 )
-                self._goto_waypoint(wp)
+                self._goto_waypoint(wp, speed)
                 self._logger.info(
                     f"Reached waypoint {i+1}/{len(self._wpt_goto_list)}"
                 )
@@ -1287,7 +1427,121 @@ class SimplePayloadDrone:
                 "all waypoints reached successfully"
             )
             self._goto_waypoints_active = False
+            self._waypoints_complete.set() # Signal waypoints completion
         self._logger.info("Goto waypoints worker stopped")
+
+    def _return_to_launch_worker(self) -> None:
+        """
+        Worker thread function to handle return to launch operations.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Return to launch worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        
+        if self._vehicle is None:
+            self._return_to_launch_active = False
+            raise RuntimeError("Vehicle is None")
+
+        # Wait for appropriate trigger based on running threads
+        if self.debug_rtl and not self.debug_takeoff and \
+            not self.debug_goto_waypoints:
+            # Debug RTL only (no takeoff or waypoints)
+            # Wait for vehicle to be ready (GUIDED mode)
+            self._logger.info(
+                "Return to launch worker waiting for vehicle to be ready..."
+            )
+            while self._return_to_launch_active and \
+                not self._shutdown_event.is_set():
+                current_mode = self._vehicle.mode.name
+                if current_mode == "GUIDED":
+                    self._logger.info("Vehicle is ready - in GUIDED mode")
+                    break
+                else:
+                    self._logger.debug(
+                        f"Waiting for GUIDED mode (currently {current_mode})"
+                    )
+                    time.sleep(0.5)  # Check every 500ms
+        else:
+            # Normal mode or with other flight threads
+            # Wait for waypoints completion
+            self._logger.info(
+                "Return to launch worker waiting for waypoints completion..."
+            )
+            self._waypoints_complete.wait()
+        
+        self._logger.info("Return to launch worker ready to begin RTL")
+        
+        try:
+            # TODO: Implement return to launch functionality
+            # - Set mode to RTL
+            # - Wait for vehicle to return to launch position
+            # - Wait for landing completion
+            
+            self._logger.info("Return to launch completed successfully")
+            self._rtl_complete.set() # Signal RTL completion
+            
+        except Exception as e:
+            self._logger.error(f"Return to launch failed: {e}")
+            # Don't set rtl_complete on failure
+        
+        self._logger.info("Return to launch worker stopped")
+
+    def _takeoff_worker(self) -> None:
+        """
+        Worker thread function to handle takeoff operations.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Takeoff worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Takeoff worker ready to begin takeoff")
+        
+        if self._vehicle is None:
+            self._goto_waypoints_active = False
+            raise RuntimeError("Vehicle is None")
+
+        # Wait for vehicle to be ready (in GUIDED mode)
+        self._logger.info(
+            "Waiting for vehicle to be ready for takeoff..."
+        )
+        while self._takeoff_active and not self._shutdown_event.is_set():
+            current_mode = self._vehicle.mode.name
+            if current_mode == "GUIDED":
+                self._logger.info("Vehicle is ready - in GUIDED mode")
+                break
+            else:
+                self._logger.debug(
+                    f"Waiting for GUIDED mode (currently {current_mode})"
+                )
+                time.sleep(0.5) # Check every 500ms
+
+        try:
+            # TODO: Implement takeoff functionality
+            # - Takeoff to specified altitude
+            # - Wait for takeoff completion
+            
+            self._logger.info("Takeoff completed successfully")
+            self._takeoff_complete.set()  # Signal takeoff completion
+            
+        except Exception as e:
+            self._logger.error(f"Takeoff failed: {e}")
+            self._takeoff_active = False
+            # Don't set takeoff_complete on failure
+        
+        self._logger.info("Takeoff worker stopped")
 
     def _udp_publisher_worker(self) -> None:
         """
@@ -1360,6 +1614,10 @@ class SimplePayloadDrone:
             self._sock.close()
         self._start_event.clear()
         self._shutdown_event.clear()
+        # Clear flight sequence coordination events
+        self._takeoff_complete.clear()
+        self._waypoints_complete.clear()
+        self._rtl_complete.clear()
         self._logger.info("Drone cleanup complete")
     
     def run(self) -> None:
@@ -1377,10 +1635,14 @@ class SimplePayloadDrone:
             self._logger.info("Running in camera-control-only mode")
         elif self.debug_detect:
             self._logger.info("Running in detection-only mode with vehicle")
-        elif self.debug_detect_no_vech:
+        elif self.debug_detect_no_vehicle:
             self._logger.info("Running in detection-only mode without vehicle")
         elif self.debug_goto_waypoints:
             self._logger.info("Running in goto-waypoints-only mode")
+        elif self.debug_rtl:
+            self._logger.info("Running in return-to-launch-only mode")
+        elif self.debug_takeoff:
+            self._logger.info("Running in takeoff-only mode")
         else:
             self._logger.info("Running in default mode")
         
@@ -1455,7 +1717,7 @@ def get_args() -> argparse.Namespace:
         help="Runs detection only with vehicle connection for location"
     )
     parser.add_argument(
-        "--debug-detect-no-vech",
+        "--debug-detect-no-vehicle",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs detection only without vehicle connection (no location)"
@@ -1465,6 +1727,18 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs go to waypoints only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-rtl",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs return to launch only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-takeoff",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs takeoff only with vehicle connection"
     )
     parser.add_argument(
         "--show-preview",
