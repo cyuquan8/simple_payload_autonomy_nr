@@ -11,7 +11,6 @@ import queue
 import time
 import threading
 import socket
-import json
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -157,6 +156,7 @@ class SimplePayloadDrone:
         # Drone parameters
         self.drone_id = args.drone_id
         # Takeoff parameters
+        self.takeoff_alt_threshold = args.takeoff_alt_threshold
         self.takeoff_target_alt = args.takeoff_target_alt
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
@@ -526,9 +526,9 @@ class SimplePayloadDrone:
             thickness=2
         )
 
-    #######################################
-    ### Goto waypoints helper functions ###
-    #######################################
+    ###############################
+    ### Flight helper functions ###
+    ###############################
 
     @staticmethod
     def _get_distance_metres(aLocation1, aLocation2) -> float:
@@ -571,7 +571,9 @@ class SimplePayloadDrone:
             None
             
         Raises:
-            RuntimeError: If vehicle is None or not available
+            RuntimeError: If vehicle is None, waypoint navigation is interrupted 
+                due to mode change, or waypoint navigation is interrupted by 
+                shutdown
             
         Note:
             This function blocks until the waypoint is reached or the vehicle
@@ -618,13 +620,15 @@ class SimplePayloadDrone:
                 break
             time.sleep(0.5) # Wait before next distance check
         
-        # Log reason for exit if interrupted by shutdown
+        # Check for interruption and raise exception if needed
         if not self._goto_waypoints_active: 
-            self._logger.warning(
-                f"Waypoint navigation to {targetLocation} interuppted"
-            )
+            msg = f"Waypoint navigation to {targetLocation} interrupted"
+            self._logger.warning(msg)
+            raise RuntimeError(msg)
         elif self._shutdown_event.is_set():
-            self._logger.info("Waypoint navigation interrupted by shutdown")
+            msg = "Waypoint navigation interrupted by shutdown"
+            self._logger.info(msg)
+            raise RuntimeError(msg)
 
     def _parse_json_to_waypoints(
             self, 
@@ -762,6 +766,68 @@ class SimplePayloadDrone:
                 f"Unexpected error parsing waypoints from {filepath}: {e}"
             )
             return None
+
+    def _takeoff(self, target_altitude: float) -> None:
+        """
+        Execute takeoff to specified altitude using DroneKit simple_takeoff.
+        
+        Commands the vehicle to takeoff to the specified target altitude and 
+        monitors progress until the configured threshold percentage of the 
+        target altitude is reached or the operation is interrupted.
+        
+        Args:
+            target_altitude: Target altitude in meters for takeoff
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If vehicle is None, takeoff is interrupted due to mode 
+                change, or takeoff is interrupted by shutdown
+            
+        Note:
+            This function blocks until the configured threshold percentage of 
+            target altitude is reached or the takeoff operation is interrupted. 
+            Monitors altitude every 500ms.
+        """
+        # Validate vehicle availability
+        if self._vehicle is None:
+            self._takeoff_active = False
+            raise RuntimeError("Vehicle is None")
+        
+        self._logger.info(f"Starting takeoff to {target_altitude}m altitude")
+        # Execute takeoff command
+        self._vehicle.simple_takeoff(target_altitude)
+        # Monitor altitude progress
+        while self._takeoff_active and not self._shutdown_event.is_set():
+            # Check if vehicle is still in GUIDED mode
+            current_mode = self._vehicle.mode.name
+            if current_mode != "GUIDED":
+                self._logger.warning(
+                    f"Takeoff stopped - vehicle changed to {current_mode} mode"
+                )
+                self._takeoff_active = False
+                break
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
+            # Check if we've reached threshold percentage of target altitude
+            if current_altitude >= \
+                target_altitude * self.takeoff_alt_threshold:
+                self._logger.info(
+                    f"Reached target altitude: {current_altitude:.2f}m"
+                )
+                break
+            time.sleep(0.5) # Check every 500ms
+        
+        # Check for interruption and raise exception if needed
+        if not self._takeoff_active:
+            msg = "Takeoff interrupted due to mode change"
+            self._logger.warning(msg)
+            raise RuntimeError(msg)
+        elif self._shutdown_event.is_set():
+            msg = "Takeoff interrupted by shutdown"
+            self._logger.info(msg)
+            raise RuntimeError(msg)
 
     ######################################
     ### Message queue helper functions ###
@@ -1518,7 +1584,7 @@ class SimplePayloadDrone:
         self._logger.info("Takeoff worker ready to begin takeoff")
         
         if self._vehicle is None:
-            self._goto_waypoints_active = False
+            self._takeoff_active = False
             raise RuntimeError("Vehicle is None")
 
         # Wait for vehicle to be ready (in GUIDED mode)
@@ -1537,24 +1603,12 @@ class SimplePayloadDrone:
                 time.sleep(0.5) # Check every 500ms
 
         try:
-            # TODO: Implement takeoff functionality
-            # - Takeoff to specified altitude
-            # - Wait for takeoff completion
-            " takeoff vehicle helper function."
-            self._vehicle.simple_takeoff(self.takeoff_target_alt)
-            # Wait until the vehicle reaches a safe altitude
-            while True:
-                self._logger.debug(f" Altitude: {self._vehicle.location.global_relative_frame.alt:.2f}")
-                if self._vehicle.location.global_relative_frame.alt >= self.takeoff_target_alt * 0.95: # Reached 95% of target
-                    self._logger.debug("Reached target altitude")
-                    break
-                time.sleep(0.5)
-            
+            # Execute takeoff using helper function
+            self._takeoff(self.takeoff_target_alt)
             self._logger.info("Takeoff completed successfully")
-            self._takeoff_complete.set()  # Signal takeoff completion
-            
+            self._takeoff_complete.set() # Signal takeoff completion
         except Exception as e:
-            self._logger.error(f"Takeoff failed: {e}")
+            self._logger.error(f"Error during takeoff: {e}")
             self._takeoff_active = False
             # Don't set takeoff_complete on failure
         
@@ -1998,13 +2052,24 @@ def get_args() -> argparse.Namespace:
         help="Drone identification string",
         type=str
     )
-    # takeoff parameters
+
+    # Takeoff parameters
+    parser.add_argument(
+        "--takeoff-alt-threshold",
+        default=0.95,
+        help=(
+            "Takeoff completion threshold as fraction of target altitude "
+            "(default: 0.95 = 95%)"
+        ),
+        type=float
+    )
     parser.add_argument(
         "--takeoff-target-alt",
         default=30.0,
         help="Takeoff target altitude in meters",
         type=float
     )
+
     # Waypoint parameters
     parser.add_argument(
         "--wpt-json-filename",
