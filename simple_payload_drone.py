@@ -1408,6 +1408,11 @@ class SimplePayloadDrone:
         
         self._imx500.show_network_fw_progress_bar()
         self._picam2.start(config, show_preview=show_preview)
+        # Auto white balance (AWB) and auto exposure (AE)
+        self._picam2.set_controls({
+            "AwbEnable": True,
+            "AeEnable": True
+        })
         
         if self._intrinsics.preserve_aspect_ratio:
             self._imx500.set_auto_aspect_ratio()
