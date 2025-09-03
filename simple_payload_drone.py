@@ -156,6 +156,8 @@ class SimplePayloadDrone:
         self.vflip = args.vflip
         # Drone parameters
         self.drone_id = args.drone_id
+        # Takeoff parameters
+        self.takeoff_target_alt = args.takeoff_target_alt
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
         self.wpt_json_filename = args.wpt_json_filename
@@ -1483,6 +1485,12 @@ class SimplePayloadDrone:
             # - Set mode to RTL
             # - Wait for vehicle to return to launch position
             # - Wait for landing completion
+            self._vehicle.mode = VehicleMode("RTL")
+            # Wait until the vehicle reaches a safe altitude
+            while True:
+                self._logger.debug(f" Altitude: {self._vehicle.location.global_relative_frame.alt:.2f}")
+                if self._vehicle.location.global_relative_frame.alt <= 0.05: # Reached 0.05m altitude
+                    break
             
             self._logger.info("Return to launch completed successfully")
             self._rtl_complete.set() # Signal RTL completion
@@ -1532,6 +1540,15 @@ class SimplePayloadDrone:
             # TODO: Implement takeoff functionality
             # - Takeoff to specified altitude
             # - Wait for takeoff completion
+            " takeoff vehicle helper function."
+            self._vehicle.simple_takeoff(self.takeoff_target_alt)
+            # Wait until the vehicle reaches a safe altitude
+            while True:
+                self._logger.debug(f" Altitude: {self._vehicle.location.global_relative_frame.alt:.2f}")
+                if self._vehicle.location.global_relative_frame.alt >= self.takeoff_target_alt * 0.95: # Reached 95% of target
+                    self._logger.debug("Reached target altitude")
+                    break
+                time.sleep(0.5)
             
             self._logger.info("Takeoff completed successfully")
             self._takeoff_complete.set()  # Signal takeoff completion
@@ -1981,7 +1998,13 @@ def get_args() -> argparse.Namespace:
         help="Drone identification string",
         type=str
     )
-
+    # takeoff parameters
+    parser.add_argument(
+        "--takeoff-target-alt",
+        default=30.0,
+        help="Takeoff target altitude in meters",
+        type=float
+    )
     # Waypoint parameters
     parser.add_argument(
         "--wpt-json-filename",
