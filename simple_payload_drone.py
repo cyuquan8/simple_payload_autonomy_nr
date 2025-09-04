@@ -1596,6 +1596,7 @@ class SimplePayloadDrone:
                 "Goto waypoints worker terminated - "
                 "stopped due to navigation error"
             )
+            self.shutdown()
         elif self._shutdown_event.is_set():
             # Shutdown was requested
             self._logger.info(
@@ -1682,6 +1683,7 @@ class SimplePayloadDrone:
         except Exception as e:
             self._logger.error(f"Error during return to launch: {e}")
             self._return_to_launch_active = False
+            self.shutdown()
             # Don't set rtl_complete on failure
         
         self._logger.info("Return to launch worker stopped")
@@ -1735,6 +1737,7 @@ class SimplePayloadDrone:
         except Exception as e:
             self._logger.error(f"Error during takeoff: {e}")
             self._takeoff_active = False
+            self.shutdown()
             # Don't set takeoff_complete on failure
         
         self._logger.info("Takeoff worker stopped")
