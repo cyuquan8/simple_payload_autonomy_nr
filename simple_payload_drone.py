@@ -1774,8 +1774,13 @@ class SimplePayloadDrone:
         self._stop_threads()
         if hasattr(self, '_sock') and self._sock:
             self._sock.close()
+            self._logger.info("Closed UDP socket")
         if hasattr(self, '_pwm') and self._pwm:
             self._pwm.stop()
+            self._logger.info("Stopped PWM servo")
+        if hasattr(self, '_vehicle') and self._vehicle:
+            self._vehicle.close()
+            self._logger.info("Closed vehicle connection")
         self._start_event.clear()
         self._shutdown_event.clear()
         # Clear flight sequence coordination events
