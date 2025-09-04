@@ -606,14 +606,10 @@ class SimplePayloadDrone:
             if current_mode == "GUIDED":
                 # Expected mode - log for debugging
                 self._logger.debug(f"Vehicle in GUIDED mode")
-            elif current_mode == "LOITER":
-                # LOITER is normal during waypoint transitions - log as info
-                self._logger.info(f"Vehicle in LOITER mode during navigation")
             else:
-                # Only terminate on truly problematic modes
                 self._logger.warning(
                     f"Waypoint navigation stopped - "
-                    f"vehicle changed to unsafe mode: {current_mode}"
+                    f"vehicle changed to mode: {current_mode}"
                 )
                 self._goto_waypoints_active = False
                 break
@@ -826,10 +822,8 @@ class SimplePayloadDrone:
             current_mode = self._vehicle.mode.name
             if current_mode != "RTL":
                 self._logger.warning(
-                    f"RTL stopped - vehicle changed to {current_mode} mode"
+                    f"RTL warning - vehicle changed to {current_mode} mode"
                 )
-                self._return_to_launch_active = False
-                break
             current_altitude = self._vehicle.location.global_relative_frame.alt
             self._logger.debug(f"Altitude: {current_altitude:.2f}m")
             # Check if we've reached near-ground altitude (landing complete)
@@ -2212,7 +2206,7 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--wpt-arrival-threshold",
-        default=0.01,
+        default=0.05,
         help="Waypoint arrival threshold as fraction of initial distance",
         type=float
     )
