@@ -1617,6 +1617,10 @@ class SimplePayloadDrone:
             )
             self._goto_waypoints_active = False
             self._waypoints_complete.set() # Signal waypoints completion
+            # Check if this is the final flight phase and trigger shutdown
+            if self.debug_goto_waypoints and not self.debug_rtl:
+                self._logger.info("Goto waypoints complete - shutting down")
+                self.shutdown()
         self._logger.info("Goto waypoints worker stopped")
 
     def _return_to_launch_worker(self) -> None:
@@ -1680,6 +1684,9 @@ class SimplePayloadDrone:
             self._return_to_launch()
             self._logger.info("Return to launch completed successfully")
             self._rtl_complete.set()  # Signal RTL completion
+            # RTL is always the final flight phase - trigger shutdown
+            self._logger.info("Return to launch complete - shutting down")
+            self.shutdown()
         except Exception as e:
             self._logger.error(f"Error during return to launch: {e}")
             self._return_to_launch_active = False
@@ -1727,6 +1734,12 @@ class SimplePayloadDrone:
             self._takeoff(self.takeoff_target_alt)
             self._logger.info("Takeoff completed successfully")
             self._takeoff_complete.set() # Signal takeoff completion
+            # Check if this is the final flight phase and trigger shutdown
+            if (self.debug_takeoff and 
+                not self.debug_goto_waypoints and 
+                not self.debug_rtl):
+                self._logger.info("Takeoff-only mode complete - shutting down")
+                self.shutdown()
         except Exception as e:
             self._logger.error(f"Error during takeoff: {e}")
             self._takeoff_active = False
@@ -1814,7 +1827,7 @@ class SimplePayloadDrone:
         else:
             self._logger.info("Running in default mode")
         
-        # Wait for shutdown event while worker threads process in backgroundo
+        # Wait for shutdown event while worker threads process in background
         self._shutdown_event.wait()
         # Automatically cleanup resources when shutdown occurs
         self._cleanup_resources()
