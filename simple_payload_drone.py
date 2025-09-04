@@ -1522,6 +1522,7 @@ class SimplePayloadDrone:
         
         # Wait for synchronized start signal
         self._start_event.wait()
+        self._logger.info("Goto waypoints worker ready to begin processing")
 
         if self._vehicle is None:
             self._goto_waypoints_active = False
@@ -1563,8 +1564,6 @@ class SimplePayloadDrone:
                     "Goto waypoints worker interrupted during takeoff wait"
                 )
                 return # Exit the worker
-        
-        self._logger.info("Goto waypoints worker ready to begin processing")
         
         # Execute waypoint navigation
         self._logger.info(
@@ -1631,6 +1630,7 @@ class SimplePayloadDrone:
         
         # Wait for synchronized start signal
         self._start_event.wait()
+        self._logger.info("Return to launch worker ready to begin processing")
         
         if self._vehicle is None:
             self._return_to_launch_active = False
@@ -1671,8 +1671,6 @@ class SimplePayloadDrone:
                 )
                 return # Exit the worker
         
-        self._logger.info("Return to launch worker ready to begin RTL")
-        
         try:
             # Execute return to launch using helper function
             self._return_to_launch()
@@ -1702,7 +1700,7 @@ class SimplePayloadDrone:
         
         # Wait for synchronized start signal
         self._start_event.wait()
-        self._logger.info("Takeoff worker ready to begin takeoff")
+        self._logger.info("Takeoff worker ready to begin processing")
         
         if self._vehicle is None:
             self._takeoff_active = False
