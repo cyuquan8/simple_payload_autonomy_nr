@@ -1017,6 +1017,35 @@ class SimplePayloadDrone:
     ### Thread handler functions ###
     ################################
 
+    def _cleanup_resources(self) -> None:
+        """
+        Private helper to cleanup drone resources and stop background threads.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Cleaning up drone resources...")
+        self._stop_threads()
+        if hasattr(self, '_sock') and self._sock:
+            self._sock.close()
+            self._logger.info("Closed UDP socket")
+        if hasattr(self, '_pwm') and self._pwm:
+            self._pwm.stop()
+            self._logger.info("Stopped PWM servo")
+        if hasattr(self, '_vehicle') and self._vehicle:
+            self._vehicle.close()
+            self._logger.info("Closed vehicle connection")
+        self._start_event.clear()
+        self._shutdown_event.clear()
+        # Clear flight sequence coordination events
+        self._takeoff_complete.clear()
+        self._waypoints_complete.clear()
+        self._rtl_complete.clear()
+        self._logger.info("Drone cleanup complete")
+
     def _start_camera_pitch_worker(self) -> None:
         """
         Start the camera pitch worker thread.
@@ -1759,36 +1788,6 @@ class SimplePayloadDrone:
     ### Exposed functions ###
     #########################
     
-    def cleanup(self) -> None:
-        """
-        Cleanup drone resources and stop background threads.
-        
-        Args:
-            None
-            
-        Returns:
-            None
-        """
-        self._logger.info("Cleaning up drone resources...")
-        self._shutdown_event.set()
-        self._stop_threads()
-        if hasattr(self, '_sock') and self._sock:
-            self._sock.close()
-            self._logger.info("Closed UDP socket")
-        if hasattr(self, '_pwm') and self._pwm:
-            self._pwm.stop()
-            self._logger.info("Stopped PWM servo")
-        if hasattr(self, '_vehicle') and self._vehicle:
-            self._vehicle.close()
-            self._logger.info("Closed vehicle connection")
-        self._start_event.clear()
-        self._shutdown_event.clear()
-        # Clear flight sequence coordination events
-        self._takeoff_complete.clear()
-        self._waypoints_complete.clear()
-        self._rtl_complete.clear()
-        self._logger.info("Drone cleanup complete")
-    
     def run(self) -> None:
         """
         Run the drone in the appropriate mode based on debug settings.
@@ -1815,8 +1814,23 @@ class SimplePayloadDrone:
         else:
             self._logger.info("Running in default mode")
         
-        # Wait for shutdown event while worker threads process in background
+        # Wait for shutdown event while worker threads process in backgroundo
         self._shutdown_event.wait()
+        # Automatically cleanup resources when shutdown occurs
+        self._cleanup_resources()
+    
+    def shutdown(self) -> None:
+        """
+        Signal the drone to shut down gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Shutdown requested")
+        self._shutdown_event.set()
 
     def start(self, show_preview: bool = True) -> None:
         """
@@ -2210,10 +2224,10 @@ def main() -> None:
         drone.run()
     except KeyboardInterrupt:
         drone.logger.info("Received keyboard interrupt, shutting down...")
+        drone.shutdown()
     except Exception as e:
         drone.logger.error(f"Application error: {e}")
-    finally:
-        drone.cleanup()
+        drone.shutdown()
 
 if __name__ == "__main__":
     
