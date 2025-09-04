@@ -573,7 +573,7 @@ class SimplePayloadDrone:
             None
             
         Raises:
-            RuntimeError: If vehicle is None, waypoint navigation is interrupted 
+            RuntimeError: If vehicle is None, waypoint navigation is interrupted
                 due to mode change, or waypoint navigation is interrupted by 
                 shutdown
             
@@ -601,12 +601,19 @@ class SimplePayloadDrone:
 
         # Monitor progress until arrival or shutdown
         while self._goto_waypoints_active and not self._shutdown_event.is_set():
-            # Check if vehicle is still in GUIDED mode
+            # Check vehicle mode and handle appropriately
             current_mode = self._vehicle.mode.name
-            if current_mode != "GUIDED":
+            if current_mode == "GUIDED":
+                # Expected mode - log for debugging
+                self._logger.debug(f"Vehicle in GUIDED mode")
+            elif current_mode == "LOITER":
+                # LOITER is normal during waypoint transitions - log as info
+                self._logger.info(f"Vehicle in LOITER mode during navigation")
+            else:
+                # Only terminate on truly problematic modes
                 self._logger.warning(
                     f"Waypoint navigation stopped - "
-                    f"vehicle changed to {current_mode} mode"
+                    f"vehicle changed to unsafe mode: {current_mode}"
                 )
                 self._goto_waypoints_active = False
                 break
@@ -981,6 +988,7 @@ class SimplePayloadDrone:
     ################################
     ### Vehicle helper functions ###
     ################################
+
     def _get_vehicle_location(self) -> dict[str, Any]:
         """
         Get current vehicle location if vehicle is connected.
