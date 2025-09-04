@@ -155,6 +155,8 @@ class SimplePayloadDrone:
         self.vflip = args.vflip
         # Drone parameters
         self.drone_id = args.drone_id
+        # RTL parameters
+        self.rtl_landing_alt = args.rtl_landing_alt
         # Takeoff parameters
         self.takeoff_alt_threshold = args.takeoff_alt_threshold
         self.takeoff_target_alt = args.takeoff_target_alt
@@ -766,6 +768,80 @@ class SimplePayloadDrone:
                 f"Unexpected error parsing waypoints from {filepath}: {e}"
             )
             return None
+
+    def _return_to_launch(self) -> None:
+        """
+        Execute return to launch using DroneKit RTL mode.
+        
+        Commands the vehicle to return to launch position and monitors progress 
+        until the vehicle lands (reaches near-ground altitude) or the operation 
+        is interrupted.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If vehicle is None, RTL is interrupted due to mode 
+                change, or RTL is interrupted by shutdown
+            
+        Note:
+            This function blocks until the vehicle reaches the configured 
+            landing altitude threshold or the RTL operation is interrupted. 
+            Monitors altitude every 500ms.
+        """
+        # Validate vehicle availability
+        if self._vehicle is None:
+            self._return_to_launch_active = False
+            raise RuntimeError("Vehicle is None")
+        
+        # Check if vehicle is in GUIDED mode before RTL
+        current_mode = self._vehicle.mode.name
+        if current_mode != "GUIDED":
+            self._logger.warning(
+                f"Vehicle not in GUIDED mode (currently {current_mode}). "
+                f"Cannot start RTL safely."
+            )
+            self._return_to_launch_active = False
+            raise RuntimeError(
+                f"Vehicle not in GUIDED mode: {current_mode}"
+            )
+        
+        self._logger.info("Starting return to launch")
+        # Set vehicle mode to RTL
+        self._vehicle.mode = VehicleMode("RTL")
+        # Monitor landing progress
+        while self._return_to_launch_active and \
+            not self._shutdown_event.is_set():
+            # Check if vehicle is still in RTL mode
+            current_mode = self._vehicle.mode.name
+            if current_mode != "RTL":
+                self._logger.warning(
+                    f"RTL stopped - vehicle changed to {current_mode} mode"
+                )
+                self._return_to_launch_active = False
+                break
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
+            # Check if we've reached near-ground altitude (landing complete)
+            if current_altitude <= self.rtl_landing_alt:
+                self._logger.info(
+                    f"Landing completed: {current_altitude:.2f}m"
+                )
+                break
+            time.sleep(0.5)  # Check every 500ms
+        
+        # Check for interruption and raise exception if needed
+        if not self._return_to_launch_active:
+            msg = "Return to launch interrupted due to mode change"
+            self._logger.warning(msg)
+            raise RuntimeError(msg)
+        elif self._shutdown_event.is_set():
+            msg = "Return to launch interrupted by shutdown"
+            self._logger.info(msg)
+            raise RuntimeError(msg)
 
     def _takeoff(self, target_altitude: float) -> None:
         """
@@ -1547,22 +1623,13 @@ class SimplePayloadDrone:
         self._logger.info("Return to launch worker ready to begin RTL")
         
         try:
-            # TODO: Implement return to launch functionality
-            # - Set mode to RTL
-            # - Wait for vehicle to return to launch position
-            # - Wait for landing completion
-            self._vehicle.mode = VehicleMode("RTL")
-            # Wait until the vehicle reaches a safe altitude
-            while True:
-                self._logger.debug(f" Altitude: {self._vehicle.location.global_relative_frame.alt:.2f}")
-                if self._vehicle.location.global_relative_frame.alt <= 0.05: # Reached 0.05m altitude
-                    break
-            
+            # Execute return to launch using helper function
+            self._return_to_launch()
             self._logger.info("Return to launch completed successfully")
-            self._rtl_complete.set() # Signal RTL completion
-            
+            self._rtl_complete.set()  # Signal RTL completion
         except Exception as e:
-            self._logger.error(f"Return to launch failed: {e}")
+            self._logger.error(f"Error during return to launch: {e}")
+            self._return_to_launch_active = False
             # Don't set rtl_complete on failure
         
         self._logger.info("Return to launch worker stopped")
@@ -2051,6 +2118,14 @@ def get_args() -> argparse.Namespace:
         default="drone_0",
         help="Drone identification string",
         type=str
+    )
+
+    # RTL parameters
+    parser.add_argument(
+        "--rtl-landing-alt",
+        default=0.05,
+        help="RTL landing completion altitude threshold in meters",
+        type=float
     )
 
     # Takeoff parameters
