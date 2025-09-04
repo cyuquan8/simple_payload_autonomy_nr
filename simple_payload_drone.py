@@ -215,7 +215,7 @@ class SimplePayloadDrone:
         self._pwm = HardwarePWM(0, 50) # 50 Hz for servo
         # Setup UDP socket
         if args.udp_pub:
-            self._sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
         # Setup waypoints from json
         self._wpt_goto_list = self._parse_json_to_waypoints(
@@ -1523,7 +1523,15 @@ class SimplePayloadDrone:
             self._logger.info(
                 "Goto waypoints worker waiting for takeoff completion..."
             )
-            self._takeoff_complete.wait()
+            while not self._takeoff_complete.is_set() and \
+                not self._shutdown_event.is_set():
+                self._takeoff_complete.wait(timeout=1.0)
+            # Check if we should proceed with waypoints
+            if self._shutdown_event.is_set():
+                self._logger.info(
+                    "Goto waypoints worker interrupted during takeoff wait"
+                )
+                return # Exit the worker
         
         self._logger.info("Goto waypoints worker ready to begin processing")
         
@@ -1618,7 +1626,15 @@ class SimplePayloadDrone:
             self._logger.info(
                 "Return to launch worker waiting for waypoints completion..."
             )
-            self._waypoints_complete.wait()
+            while not self._waypoints_complete.is_set() and \
+                not self._shutdown_event.is_set():
+                self._waypoints_complete.wait(timeout=1.0)
+            # Check if we should proceed with RTL
+            if self._shutdown_event.is_set():
+                self._logger.info(
+                    "Return to launch worker interrupted during waypoints wait"
+                )
+                return # Exit the worker
         
         self._logger.info("Return to launch worker ready to begin RTL")
         
@@ -1750,6 +1766,8 @@ class SimplePayloadDrone:
         self._stop_threads()
         if hasattr(self, '_sock') and self._sock:
             self._sock.close()
+        if hasattr(self, '_pwm') and self._pwm:
+            self._pwm.stop()
         self._start_event.clear()
         self._shutdown_event.clear()
         # Clear flight sequence coordination events
