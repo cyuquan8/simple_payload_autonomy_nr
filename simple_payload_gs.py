@@ -58,8 +58,13 @@ class SimplePayloadGroundStation:
         self._messages_received = 0
         self._last_message_time = None
         
-        # Create image save directory if needed
+        # Create timestamped image save directory if needed
         if self.save_images:
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.image_save_dir = os.path.join(
+                self.image_save_dir, 
+                f"gs_session_{session_timestamp}"
+            )
             os.makedirs(self.image_save_dir, exist_ok=True)
     
     #########################
