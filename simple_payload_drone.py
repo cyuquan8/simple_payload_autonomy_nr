@@ -332,6 +332,7 @@ class SimplePayloadDrone:
             tuple: (list of Detection objects, image array or None)
         """
         metadata = request.get_metadata()
+        image_array = request.make_array("main")
         np_outputs = self._imx500.get_outputs(metadata, add_batch=True)
         if np_outputs is None:
             return [], None
@@ -384,7 +385,7 @@ class SimplePayloadDrone:
             if score > self.threshold
         ]
         
-        return new_detections, request.make_array("main")
+        return new_detections, image_array
 
     ################################
     ### Drawing helper functions ###
