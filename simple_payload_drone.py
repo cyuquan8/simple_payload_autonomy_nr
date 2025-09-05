@@ -1564,7 +1564,6 @@ class SimplePayloadDrone:
         while self._camera_pitch_active and not self._shutdown_event.is_set():
             try:
                 pitch = math.degrees(self._vehicle.attitude.pitch)
-                self._logger.debug(f"Pitch: {pitch:.2f} degrees")
                 # Compensate
                 servo_angle = self.base_angle + pitch
                 # Limit servo movement
