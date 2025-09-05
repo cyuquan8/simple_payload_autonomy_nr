@@ -282,41 +282,16 @@ class SimplePayloadGroundStation:
                 if message is None:
                     continue
                 
-                # Extract message components
-                detections_data = message.get('detections', [])
-                image_data = message.get('image')
-                location_data = message.get(
-                    'location', 
-                    {'lat': None, 'lon': None, 'alt': None}
-                )
-                timestamp = message.get('timestamp', 'unknown')
-                
-                # Log detection information
-                for detection in detections_data:
-                    label = detection['label']
-                    confidence = detection['confidence']
-                    lat = location_data['lat']
-                    lon = location_data['lon'] 
-                    alt = location_data['alt']
-                    self._logger.info(
-                        f"{label} detected with {confidence:.2f} confidence "
-                        f"at lat:{lat}, lon:{lon}, alt:{alt} "
-                        f"(detection time: {timestamp})"
-                    )
-                
-                # Save image if requested
-                if image_data:
-                    if self.save_images:
-                        saved_path = self._save_image(
-                            image_data, 
-                            timestamp, 
-                            location_data
-                        )
-                        if saved_path:
-                            self._logger.debug(f"Saved image to: {saved_path}")
+                # Handle message based on type
+                message_type = message.get('type', 'unknown')
+                if message_type == 'detection':
+                    self._process_detection_message(message)
+                elif message_type == 'telemetry':
+                    self._process_telemetry_message(message)
                 else:
-                    self._logger.debug("No image data in message")
-                
+                    self._logger.warning(
+                        f"Unknown message type: {message_type}"
+                    )
             except socket.timeout:
                 # Timeout is normal, just continue
                 continue
@@ -325,6 +300,66 @@ class SimplePayloadGroundStation:
                 time.sleep(0.1)  # Brief pause on error
         
         self._logger.info("UDP receiver worker stopped")
+    
+    def _process_detection_message(self, message: dict) -> None:
+        """
+        Process a detection message from the drone.
+        
+        Args:
+            message: Decoded detection message dictionary
+            
+        Returns:
+            None
+        """
+        # Extract message components
+        detections_data = message.get('detections', [])
+        image_data = message.get('image')
+        location_data = message.get(
+            'location', 
+            {'lat': None, 'lon': None, 'alt': None}
+        )
+        timestamp = message.get('timestamp', 'unknown')
+        drone_id = message.get('id', 'unknown')
+        
+        # Log detection information
+        for detection in detections_data:
+            label = detection['label']
+            confidence = detection['confidence']
+            lat = location_data['lat']
+            lon = location_data['lon'] 
+            alt = location_data['alt']
+            self._logger.info(
+                f"[ID: {drone_id}] {label} detected with "
+                f"{confidence:.2f} confidence at lat:{lat}, lon:{lon}, "
+                f"alt:{alt} (detection time: {timestamp})"
+            )
+        
+        # Save image if requested
+        if image_data:
+            if self.save_images:
+                saved_path = self._save_image(
+                    image_data, 
+                    timestamp, 
+                    location_data
+                )
+                if saved_path:
+                    self._logger.debug(f"Saved image to: {saved_path}")
+        else:
+            self._logger.debug("No image data in message")
+    
+    def _process_telemetry_message(self, message: dict) -> None:
+        """
+        Process a telemetry message from the drone.
+        
+        Args:
+            message: Decoded telemetry message dictionary
+            
+        Returns:
+            None
+        """
+        # Log telemetry information
+        drone_id = message.get('id', 'unknown')
+        self._logger.info(f"[ID: {drone_id}] Telemetry message: {message}")
     
     #########################
     ### Exposed functions ###

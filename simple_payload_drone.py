@@ -39,7 +39,8 @@ class SimplePayloadDrone:
         self._logger.setLevel(logging._nameToLevel.get(args.log_level, "DEBUG"))
         # Formatter
         formatter = logging.Formatter(
-            "%(name)s - %(asctime)s - %(levelname)s - %(message)s",
+            f"[ID: {args.drone_id}] - %(name)s - %(asctime)s - "
+            f"%(levelname)s - %(message)s",
             datefmt='%Y-%m-%dT%H:%M:%S'
         )
         # Add StreamHandler
@@ -143,6 +144,7 @@ class SimplePayloadDrone:
         self.debug_goto_waypoints = args.debug_goto_waypoints
         self.debug_rtl = args.debug_rtl
         self.debug_takeoff = args.debug_takeoff
+        self.debug_telemetry = args.debug_telemetry
         # Detection parameters
         self.detect_classes = args.detect_classes
         if len(self.detect_classes) == 0:
@@ -160,6 +162,8 @@ class SimplePayloadDrone:
         # Takeoff parameters
         self.takeoff_alt_threshold = args.takeoff_alt_threshold
         self.takeoff_target_alt = args.takeoff_target_alt
+        # Telemetry parameters
+        self.telemetry_rate = args.telemetry_rate
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
         self.wpt_json_filename = args.wpt_json_filename
@@ -186,6 +190,9 @@ class SimplePayloadDrone:
         # Takeoff worker thread
         self._takeoff_thread = None
         self._takeoff_active = False
+        # Telemetry worker thread
+        self._telemetry_thread = None
+        self._telemetry_active = False
         # UDP publishing worker thread 
         self._message_queue = queue.Queue(maxsize=args.udp_queue_maxsize)
         self._udp_thread = None
@@ -294,6 +301,8 @@ class SimplePayloadDrone:
         
         # Create message payload
         message = {
+            'type': 'detection',
+            'id': self.drone_id,
             'detections': detection_data,
             'image': img_base64,
             'location': location,
@@ -983,6 +992,79 @@ class SimplePayloadDrone:
     ### Vehicle helper functions ###
     ################################
 
+    def _encode_telemetry_message(
+            self, 
+            telemetry_data: dict[str, Any]
+        ) -> bytes:
+        """
+        Encode telemetry data into bytes for UDP transmission.
+        
+        Args:
+            telemetry_data: Dictionary containing telemetry data
+            
+        Returns:
+            bytes: JSON-encoded telemetry message as bytes for UDP transmission
+        """
+        # Create message payload
+        message = {
+            'type': 'telemetry',
+            **telemetry_data # Unpack telemetry data into message
+        }
+        
+        # Convert to JSON and encode as bytes
+        message_bytes = json.dumps(message).encode('utf-8')
+        self._logger.debug(
+            f"Telemetry message size: {len(message_bytes):,} bytes"
+        )
+        
+        return message_bytes
+
+    def _get_telemetry_data(self) -> dict[str, Any] | None:
+        """
+        Get current vehicle telemetry data if vehicle is connected.
+        
+        Args:
+            None
+            
+        Returns:
+            dict[str, Any]: Telemetry data with various vehicle parameters,
+                or None if vehicle is not available
+        """
+        if self._vehicle is None:
+            return None
+        
+        try:
+            location = self._vehicle.location.global_frame
+            attitude = self._vehicle.attitude
+            
+            return {
+                'id': self.drone_id,
+                'timestamp': datetime.now().isoformat(),
+                'mode': self._vehicle.mode.name,
+                'armed': self._vehicle.armed,
+                'location': {
+                    'lat': location.lat,
+                    'lon': location.lon,
+                    'alt': location.alt
+                },
+                'attitude': {
+                    'pitch': math.degrees(attitude.pitch),
+                    'roll': math.degrees(attitude.roll),
+                    'yaw': math.degrees(attitude.yaw)
+                },
+                'velocity': [
+                    self._vehicle.velocity[0],
+                    self._vehicle.velocity[1],
+                    self._vehicle.velocity[2]
+                ],
+                'battery': self._vehicle.battery.level,
+                'groundspeed': self._vehicle.groundspeed,
+                'airspeed': self._vehicle.airspeed
+            }
+        except Exception as e:
+            self._logger.debug(f"Error collecting telemetry data: {e}")
+            return None
+
     def _get_vehicle_location(self) -> dict[str, Any]:
         """
         Get current vehicle location if vehicle is connected.
@@ -1275,6 +1357,53 @@ class SimplePayloadDrone:
                 self._logger.info("Takeoff worker thread stopped")
             self._takeoff_thread = None
 
+    def _start_telemetry_worker(self) -> None:
+        """
+        Start the telemetry worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If telemetry worker is already started
+        """
+        if self._telemetry_thread is not None:
+            raise RuntimeError("Telemetry worker already started")
+        
+        self._telemetry_active = True
+        self._telemetry_thread = threading.Thread(
+            target=self._telemetry_worker,
+            daemon=True,
+            name="Telemetry-Worker"
+        )
+        self._telemetry_thread.start()
+        self._logger.info("Started telemetry worker thread")
+
+    def _stop_telemetry_worker(self) -> None:
+        """
+        Stop the telemetry worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._telemetry_thread is not None:
+            self._logger.info("Stopping telemetry worker...")
+            self._telemetry_active = False
+            self._telemetry_thread.join(timeout=5.0)
+            if self._telemetry_thread.is_alive():
+                self._logger.warning(
+                    "Telemetry worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Telemetry worker thread stopped")
+            self._telemetry_thread = None
+
     def _start_udp_publisher(self) -> None:
         """
         Start the UDP publisher thread.
@@ -1333,6 +1462,19 @@ class SimplePayloadDrone:
         """
         self._logger.info("Starting threads...")
         
+        # Check for incompatible debug modes
+        vehicle_required_modes = [
+            self.debug_camera, self.debug_detect, self.debug_goto_waypoints,
+            self.debug_rtl, self.debug_takeoff, self.debug_telemetry
+        ]
+        if any(vehicle_required_modes) and self.debug_detect_no_vehicle:
+            raise RuntimeError(
+                "debug_detect_no_vehicle cannot be used with modes that "
+                "require vehicle connection: debug_camera, debug_detect, "
+                "debug_goto_waypoints, debug_rtl, debug_takeoff, "
+                "debug_telemetry"
+            )
+
         if self.debug_camera:
             self._start_camera_pitch_worker()
         if self.debug_detect or self.debug_detect_no_vehicle:
@@ -1343,19 +1485,23 @@ class SimplePayloadDrone:
             self._start_return_to_launch_worker()
         if self.debug_takeoff:
             self._start_takeoff_worker()
+        if self.debug_telemetry:
+            self._start_telemetry_worker()
         if not (
             self.debug_camera or 
             self.debug_detect or 
             self.debug_detect_no_vehicle or 
             self.debug_goto_waypoints or
             self.debug_rtl or
-            self.debug_takeoff
+            self.debug_takeoff or
+            self.debug_telemetry
         ):
             self._start_camera_pitch_worker()
             self._start_detection_worker()
             self._start_goto_waypoints_worker()
             self._start_return_to_launch_worker()
             self._start_takeoff_worker()
+            self._start_telemetry_worker()
         
         if self.udp_pub:
             self._start_udp_publisher()
@@ -1384,6 +1530,8 @@ class SimplePayloadDrone:
             self._stop_return_to_launch_worker()
         if self._takeoff_thread is not None:
             self._stop_takeoff_worker()
+        if self._telemetry_thread is not None:
+            self._stop_telemetry_worker()
         if self._udp_thread is not None:
             self._stop_udp_publisher()
         
@@ -1742,6 +1890,46 @@ class SimplePayloadDrone:
         
         self._logger.info("Takeoff worker stopped")
 
+    def _telemetry_worker(self) -> None:
+        """
+        Worker thread function that continuously publishes telemetry data.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Telemetry worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Telemetry worker ready to begin processing")
+        
+        # Calculate sleep interval from rate
+        sleep_interval = \
+            1.0 / self.telemetry_rate if self.telemetry_rate > 0 else 1.0
+        
+        while self._telemetry_active and not self._shutdown_event.is_set():
+            try:
+                telemetry_data = self._get_telemetry_data()
+                if telemetry_data is not None:
+                    # Log telemetry data
+                    self._logger.debug(f"Telemetry data: {telemetry_data}")
+                    # Send to message queue for UDP publishing if enabled
+                    if self.udp_pub:
+                        message_bytes = self._encode_telemetry_message(
+                            telemetry_data
+                        )
+                        self._enqueue_message(message_bytes)
+                
+                time.sleep(sleep_interval)
+            except Exception as e:
+                self._logger.error(f"Telemetry worker error: {e}")
+                time.sleep(0.1) # Brief pause on error
+        
+        self._logger.info("Telemetry worker stopped")
+
     def _udp_publisher_worker(self) -> None:
         """
         Worker thread function to process message queue and send UDP messages.
@@ -1930,6 +2118,12 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs takeoff only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-telemetry",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable telemetry publishing to ground station for debugging"
     )
     parser.add_argument(
         "--show-preview",
@@ -2195,6 +2389,14 @@ def get_args() -> argparse.Namespace:
         "--takeoff-target-alt",
         default=30.0,
         help="Takeoff target altitude in meters",
+        type=float
+    )
+
+    # Telemetry parameters
+    parser.add_argument(
+        "--telemetry-rate",
+        default=1.0,
+        help="Telemetry publishing rate in Hz (0 = disable telemetry)",
         type=float
     )
 
