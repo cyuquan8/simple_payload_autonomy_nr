@@ -446,7 +446,7 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--image-save-dir",
-        default="./images/received/",
+        default="./images/",
         help="Directory to save received detection images",
         type=str
     )
@@ -454,7 +454,7 @@ def get_args() -> argparse.Namespace:
     # Logging
     parser.add_argument(
         "--log-dir",
-        default="./logs/ground_station/",
+        default="./logs/simple_payload_ground_station/",
         help="Directory to save log files with timestamps",
         type=str
     )

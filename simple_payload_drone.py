@@ -2154,7 +2154,7 @@ def get_args() -> argparse.Namespace:
     # Logging
     parser.add_argument(
         "--log-dir",
-        default="./logs/target_detection/",
+        default="./logs/simple_payload_drone/",
         help="Directory to save log files with timestamps",
         type=str
     )
