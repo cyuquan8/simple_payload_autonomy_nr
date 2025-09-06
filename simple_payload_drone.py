@@ -179,7 +179,10 @@ class SimplePayloadDrone:
             self.wpt_json_dir, 
             self.wpt_json_filename
         )
-        self.wpt_arrival_threshold = args.wpt_arrival_threshold
+        self.wpt_arrival_threshold_dist = args.wpt_arrival_threshold_dist
+        self.wpt_arrival_threshold_frac = args.wpt_arrival_threshold_frac
+        self.wpt_arrival_threshold_use_dist = \
+            args.wpt_arrival_threshold_use_dist
         
         # Threads
         
@@ -722,6 +725,7 @@ class SimplePayloadDrone:
         )
 
         # Monitor progress until arrival or shutdown
+        reached_target = False
         while self._goto_waypoints_active and not self._shutdown_event.is_set():
             # Check vehicle mode and handle appropriately
             current_mode = self._vehicle.mode.name
@@ -742,7 +746,14 @@ class SimplePayloadDrone:
             )
             self._logger.debug(f"Distance to target: {remainingDistance:.2f}m")
             # Check if we've reached the target using arrival threshold
-            if remainingDistance <= targetDistance * self.wpt_arrival_threshold:
+            if self.wpt_arrival_threshold_use_dist:
+                if remainingDistance <= self.wpt_arrival_threshold_dist:
+                    reached_target = True
+            else:
+                if remainingDistance <= \
+                    targetDistance * self.wpt_arrival_threshold_frac:
+                    reached_target = True
+            if reached_target:
                 self._logger.debug(f"Reached target {targetLocation}")
                 break
             time.sleep(0.5) # Wait before next distance check
@@ -2599,10 +2610,23 @@ def get_args() -> argparse.Namespace:
         type=str
     )
     parser.add_argument(
-        "--wpt-arrival-threshold",
+        "--wpt-arrival-threshold-dist",
+        default=5.0,
+        help="Waypoint arrival threshold as absolute distance in metres",
+        type=float
+    )
+    parser.add_argument(
+        "--wpt-arrival-threshold-frac",
         default=0.05,
         help="Waypoint arrival threshold as fraction of initial distance",
         type=float
+    )
+    parser.add_argument(
+        "--wpt-arrival-threshold-use-dist",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to use absolute distance or fraction as threshold",
+        type=bool
     )
     
     return parser.parse_args()
