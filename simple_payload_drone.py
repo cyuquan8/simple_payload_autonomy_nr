@@ -1041,9 +1041,10 @@ class SimplePayloadDrone:
             )
         
         # Confirm vehicle armed before attempting to take off
+        self._logger.info("Waiting for vehicle to be armed...")
         while not self._vehicle.armed and self._takeoff_active and \
             not self._shutdown_event.is_set():
-            self._logger.info("Waiting for arming...")
+            self._logger.debug("Waiting for arming...")
             time.sleep(0.5) # Check every 500ms
         # Check for shutdown during arming wait
         if self._shutdown_event.is_set():
