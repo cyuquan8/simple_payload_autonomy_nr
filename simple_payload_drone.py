@@ -2135,7 +2135,7 @@ def get_args() -> argparse.Namespace:
     # Directories
     parser.add_argument(
         "--model-dir", 
-        default="/home/useradmin/imx500-models/", 
+        default="/home/useradmin/simple_payload_autonomy_nr/imx500-models/", 
         help="Path to directory containing models",
         type=str
     )
