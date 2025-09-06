@@ -169,13 +169,18 @@ class SimplePayloadGroundStation:
         for detection in detections_data:
             label = detection['label']
             confidence = detection['confidence']
-            lat = location_data['lat']
-            lon = location_data['lon'] 
-            alt = location_data['alt']
+            vehicle_lat = location_data['lat']
+            vehicle_lon = location_data['lon'] 
+            vehicle_alt = location_data['alt']
+            pred_loc = detection['pred_loc']
+            
             self._logger.info(
-                f"[ID: {drone_id}] {label} detected with "
-                f"{confidence:.2f} confidence at lat:{lat}, lon:{lon}, "
-                f"alt:{alt} (detection time: {timestamp})"
+                f"[ID: {drone_id}] {label} detected with {confidence:.2f} "
+                f"confidence at vehicle pos lat:{vehicle_lat}, "
+                f"lon:{vehicle_lon}, alt:{vehicle_alt} -> predicted object "
+                f"pos lat:{pred_loc['lat']}, lon:{pred_loc['lon']}, "
+                f"bearing:{pred_loc['bearing_deg']}, "
+                f"distance:{pred_loc['distance_m']} (time: {timestamp})"
             )
         
         # Save image if requested

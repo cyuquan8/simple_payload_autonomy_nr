@@ -12,7 +12,7 @@ import time
 import threading
 import socket
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 from picamera2 import MappedArray, Picamera2
@@ -30,6 +30,12 @@ class Detection:
     box: tuple[int, int, int, int]
     category: int
     conf: float
+    pred_loc: dict[str, float | None] = field(default_factory=lambda: {
+        'bearing_deg': None,
+        'distance_m': None,
+        'lat': None,
+        'lon': None,
+    })
         
 class SimplePayloadDrone:
     def __init__(self, args: argparse.Namespace):
@@ -127,6 +133,8 @@ class SimplePayloadDrone:
 
         # Camera parameters
         self.buffer_count = args.buffer_count
+        self.camera_hfov = args.camera_hfov
+        self.camera_vfov = args.camera_vfov
         # Connection parameters
         self.rpi_baud_rate = args.rpi_baud_rate
         self.rpi_serial_port = args.rpi_serial_port
@@ -297,6 +305,7 @@ class SimplePayloadDrone:
                 'category': d.category, # int
                 'confidence': float(d.conf), # Convert numpy float32 to float
                 'label': self._labels_used[d.category], # str
+                'pred_loc': d.pred_loc, # dict with predicted GPS coordinates
             })
         
         # Create message payload
@@ -317,6 +326,109 @@ class SimplePayloadDrone:
         
         return message_bytes
     
+    def _get_detection_predicted_location(
+            self, 
+            detection: Detection, 
+            image_size: tuple[int, int],
+            vehicle_attitude: dict[str, Any],
+            vehicle_location: dict[str, Any],
+        ) -> dict[str, float | None]:
+        """
+        Get predicted GPS location of detected object using camera geometry 
+        and vehicle position.
+        
+        Args:
+            detection: Detection object with bounding box
+            image_size: (width, height) of the image
+            vehicle_attitude: Dict with 'pitch', 'roll', 'yaw' keys (degrees)
+            vehicle_location: Dict with 'lat', 'lon', 'alt' keys
+            
+        Returns:
+            dict[str, float | None]: Always returns a dict with keys 
+                'bearing_deg', 'distance_m', 'lat', 'lon'. Individual values 
+                are float if calculation succeeds, None if calculation fails 
+                or data is invalid.
+        """
+        # Initialize return structure with None values
+        pred_loc: dict[str, float | None] = {
+            'bearing_deg': None,
+            'distance_m': None,
+            'lat': None,
+            'lon': None,
+        }
+        
+        # Check if required vehicle data is available
+        if (
+            vehicle_attitude.get('pitch') is None or 
+            vehicle_attitude.get('roll') is None or 
+            vehicle_attitude.get('yaw') is None or
+            vehicle_location.get('lat') is None or 
+            vehicle_location.get('lon') is None or 
+            vehicle_location.get('alt') is None
+        ):
+            return pred_loc
+            
+        try:
+            # Extract detection center point
+            # The box format after convert_inference_coords is (x, y, w, h)
+            x, y, w, h = detection.box
+            center_x = x + w / 2
+            center_y = y + h / 2
+            # Image dimensions
+            img_width, img_height = image_size
+            # Convert pixel coordinates to normalized coordinates (-1 to 1)
+            norm_x = (center_x - img_width / 2) / (img_width / 2)
+            norm_y = (center_y - img_height / 2) / (img_height / 2)
+            # Camera field of view from configuration
+            camera_fov_horizontal = math.radians(self.camera_hfov)
+            camera_fov_vertical = math.radians(self.camera_vfov)
+            # Calculate angles from camera center to object
+            angle_x = norm_x * (camera_fov_horizontal / 2)
+            angle_y = norm_y * (camera_fov_vertical / 2)
+            # Vehicle altitude and attitude
+            altitude = float(vehicle_location['alt'])
+            vehicle_yaw = math.radians(vehicle_attitude['yaw'])
+            # Camera look angle from vertical (servo maintains base_angle)
+            # base_angle: 0° = straight down, 90° = horizontal
+            # The servo compensates for vehicle pitch to maintain this angle
+            camera_angle_from_vertical = math.radians(
+                self.base_angle + math.degrees(angle_y)
+            )
+            # Calculate ground distance using trigonometry
+            # For angle from vertical, ground distance = altitude * tan(angle)
+            if camera_angle_from_vertical > math.radians(85):
+                return pred_loc # Too shallow to calculate reliably
+            ground_distance = altitude * math.tan(camera_angle_from_vertical)
+            # Calculate bearing from vehicle to object
+            # Combine vehicle yaw with horizontal angle to object
+            bearing = vehicle_yaw + angle_x
+            # Calculate displacement in meters (North/East)
+            displacement_north = ground_distance * math.cos(bearing)
+            displacement_east = ground_distance * math.sin(bearing)
+            # Convert displacement to GPS coordinates
+            # Approximate conversion (more accurate for small distances)
+            lat_per_meter = 1.0 / 111320.0  # degrees per meter
+            lon_per_meter = 1.0 / (111320.0 * math.cos(
+                math.radians(vehicle_location['lat'])
+            ))
+            predicted_lat = vehicle_location['lat'] + (
+                displacement_north * lat_per_meter
+            )
+            predicted_lon = vehicle_location['lon'] + (
+                displacement_east * lon_per_meter
+            )
+            # Update pred_loc with calculated values
+            pred_loc['bearing_deg'] = math.degrees(bearing)
+            pred_loc['distance_m'] = ground_distance
+            pred_loc['lat'] = predicted_lat
+            pred_loc['lon'] = predicted_lon
+            
+        except Exception as e:
+            self._logger.debug(f"Predicted location calculation error: {e}")
+            # pred_loc already initialized with None values, just return it
+            
+        return pred_loc
+
     def _parse_detections(
             self, 
             request
@@ -1066,6 +1178,31 @@ class SimplePayloadDrone:
             self._logger.debug(f"Error collecting telemetry data: {e}")
             return None
 
+    def _get_vehicle_attitude(self) -> dict[str, Any]:
+        """
+        Get current vehicle attitude if vehicle is connected.
+        
+        Args:
+            None
+            
+        Returns:
+            dict[str, Any]: Attitude with pitch/roll/yaw keys in degrees 
+                (values may be None)
+        """
+        if self._vehicle is None:
+            return {
+                'pitch': None,
+                'roll': None,
+                'yaw': None
+            }
+            
+        attitude = self._vehicle.attitude
+        return {
+            'pitch': math.degrees(attitude.pitch) if attitude.pitch else None,
+            'roll': math.degrees(attitude.roll) if attitude.roll else None,
+            'yaw': math.degrees(attitude.yaw) if attitude.yaw else None,
+        }
+
     def _get_vehicle_location(self) -> dict[str, Any]:
         """
         Get current vehicle location if vehicle is connected.
@@ -1612,24 +1749,42 @@ class SimplePayloadDrone:
                 else:
                     continue
                     
-                # Get vehicle location for relevant detections
+                # Get vehicle attitude and location for relevant detections
+                vehicle_attitude = self._get_vehicle_attitude()
                 vehicle_location = self._get_vehicle_location()
                 
-                # Filter relevant detections
+                # Filter relevant detections and calculate predicted GPS 
+                # coordinates
                 relevant_detections = []
                 for d in current_detections:
                     if d.category in self.detect_classes:
+                        # Calculate predicted GPS coordinates for this detection
+                        image_size = (
+                            current_image.shape[1], 
+                            current_image.shape[0]
+                        )
+                        d.pred_loc = self._get_detection_predicted_location(
+                            d, image_size, vehicle_attitude, vehicle_location
+                        )
                         relevant_detections.append(d)
-                        # Create debug message with fixed format location
-                        lat = vehicle_location['lat']
-                        lng = vehicle_location['lon'] 
-                        alt = vehicle_location['alt']
+                        
+                        # Create message with detection and prediction info
+                        vehicle_lat = vehicle_location['lat']
+                        vehicle_lng = vehicle_location['lon'] 
+                        vehicle_alt = vehicle_location['alt']
+                        pred_lat = d.pred_loc['lat']
+                        pred_lng = d.pred_loc['lon']
+                        bearing = d.pred_loc['bearing_deg']
+                        distance = d.pred_loc['distance_m']
                         msg = (
                             f"{self._intrinsics.labels[d.category]} "
-                            f"detected with {d.conf:.2f} confidence "
-                            f"at lat:{lat}, lng:{lng}, alt:{alt}"
+                            f"detected with {d.conf:.2f} confidence at "
+                            f"vehicle pos lat:{vehicle_lat}, lng:{vehicle_lng}, "
+                            f"alt:{vehicle_alt} -> predicted object pos "
+                            f"lat:{pred_lat}, lng:{pred_lng}, "
+                            f"bearing:{bearing}, distance:{distance}"
                         )
-                        self._logger.debug(msg)
+                        self._logger.info(msg)
                 
                 # Send to message queue for UDP publishing if enabled
                 if self.udp_pub and relevant_detections and \
@@ -2253,6 +2408,18 @@ def get_args() -> argparse.Namespace:
         default=12,
         help="Frames captured and stored before processing",
         type=int,
+    )
+    parser.add_argument(
+        "--camera-hfov",
+        default=78.3,
+        help="Camera horizontal FOV in degrees",
+        type=float,
+    )
+    parser.add_argument(
+        "--camera-vfov",
+        default=78.3,
+        help="Camera vertical FOV in degrees",
+        type=float,
     )
 
     # Comms parameters
