@@ -5,8 +5,8 @@ cd /home/useradmin/simple_payload_autonomy_nr
 sudo systemctl start wifibroadcast@drone
 
 # Buffer
-sleep 30
+sleep 45
 
 # Run with venv python directly (no need for activate)
 # Simple payload drone
-sudo venv/bin/python simple_payload_drone.py --detect-classes 0 2 4 7
+sudo venv/bin/python simple_payload_drone.py
