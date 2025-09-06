@@ -994,8 +994,48 @@ class SimplePayloadDrone:
             self._takeoff_active = False
             raise RuntimeError("Vehicle is None")
         
-        self._logger.info(f"Starting takeoff to {target_altitude}m altitude")
-        # Execute takeoff command
+        self._logger.info("Basic pre-arm checks")
+        # Don't try to arm until autopilot is ready
+        while not self._vehicle.is_armable and self._takeoff_active and \
+            not self._shutdown_event.is_set():
+            self._logger.debug("Waiting for vehicle to initialise...")
+            time.sleep(0.5) # Check every 500ms
+        # Check for shutdown during initialization
+        if self._shutdown_event.is_set():
+            raise RuntimeError(
+                "Takeoff interrupted by shutdown during initialization"
+            )
+        
+        # Confirm vehicle armed before attempting to take off
+        while not self._vehicle.armed and self._takeoff_active and \
+            not self._shutdown_event.is_set():
+            self._logger.info("Waiting for arming...")
+            time.sleep(0.5) # Check every 500ms
+        # Check for shutdown during arming wait
+        if self._shutdown_event.is_set():
+            raise RuntimeError(
+                "Takeoff interrupted by shutdown while waiting for arming"
+            )
+        
+        # Wait for vehicle to be in GUIDED mode
+        self._logger.info("Waiting for vehicle to be ready for takeoff...")
+        while self._takeoff_active and not self._shutdown_event.is_set():
+            current_mode = self._vehicle.mode.name
+            if current_mode == "GUIDED":
+                self._logger.info("Vehicle is ready - in GUIDED mode")
+                break
+            else:
+                self._logger.debug(
+                    f"Waiting for GUIDED mode (currently {current_mode})"
+                )
+                time.sleep(0.5) # Check every 500ms
+        # Check for shutdown during GUIDED mode wait
+        if self._shutdown_event.is_set():
+            raise RuntimeError(
+                "Takeoff interrupted by shutdown while waiting for GUIDED mode"
+            )
+        
+        self._logger.info(f"Taking off to {target_altitude}m altitude!")
         self._vehicle.simple_takeoff(target_altitude)
         # Monitor altitude progress
         while self._takeoff_active and not self._shutdown_event.is_set():
@@ -2006,25 +2046,6 @@ class SimplePayloadDrone:
         # Wait for synchronized start signal
         self._start_event.wait()
         self._logger.info("Takeoff worker ready to begin processing")
-        
-        if self._vehicle is None:
-            self._takeoff_active = False
-            raise RuntimeError("Vehicle is None")
-
-        # Wait for vehicle to be ready (in GUIDED mode)
-        self._logger.info(
-            "Waiting for vehicle to be ready for takeoff..."
-        )
-        while self._takeoff_active and not self._shutdown_event.is_set():
-            current_mode = self._vehicle.mode.name
-            if current_mode == "GUIDED":
-                self._logger.info("Vehicle is ready - in GUIDED mode")
-                break
-            else:
-                self._logger.debug(
-                    f"Waiting for GUIDED mode (currently {current_mode})"
-                )
-                time.sleep(0.5) # Check every 500ms
 
         try:
             # Execute takeoff using helper function
