@@ -1925,7 +1925,14 @@ class SimplePayloadDrone:
                     self._logger.debug(
                         f"Waiting for GUIDED mode (currently {current_mode})"
                     )
-                    time.sleep(0.5)  # Check every 500ms
+                    time.sleep(0.5) # Check every 500ms
+            # Check for shutdown during GUIDED mode wait
+            if self._shutdown_event.is_set():
+                self._logger.info(
+                    "Goto waypoints worker interrupted by shutdown while "
+                    "waiting for GUIDED mode"
+                )
+                return # Exit the worker
         else:
             # Normal mode or both debug takeoff + goto 
             # Wait for takeoff completion
