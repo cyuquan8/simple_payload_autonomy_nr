@@ -922,17 +922,51 @@ class SimplePayloadDrone:
             self._return_to_launch_active = False
             raise RuntimeError("Vehicle is None")
         
-        # Check if vehicle is in GUIDED mode before RTL
-        current_mode = self._vehicle.mode.name
-        if current_mode != "GUIDED":
-            self._logger.warning(
-                f"Vehicle not in GUIDED mode (currently {current_mode}). "
-                f"Cannot start RTL safely."
-            )
-            self._return_to_launch_active = False
-            raise RuntimeError(
-                f"Vehicle not in GUIDED mode: {current_mode}"
-            )
+        # Wait for appropriate trigger based on running threads
+        if self.debug_rtl and not self.debug_takeoff and \
+            not self.debug_goto_waypoints:
+            # Debug RTL only (no takeoff or waypoints)
+            # Wait for vehicle to be ready (GUIDED mode)
+            self._logger.info("Waiting for vehicle to be ready for RTL...")
+            while self._return_to_launch_active and \
+                not self._shutdown_event.is_set():
+                current_mode = self._vehicle.mode.name
+                if current_mode == "GUIDED":
+                    self._logger.info("Vehicle is ready - in GUIDED mode")
+                    break
+                else:
+                    self._logger.debug(
+                        f"Waiting for GUIDED mode (currently {current_mode})"
+                    )
+                    time.sleep(0.5)  # Check every 500ms
+            # Check for shutdown during GUIDED mode wait
+            if self._shutdown_event.is_set():
+                raise RuntimeError(
+                    "RTL interrupted by shutdown while waiting for GUIDED mode"
+                )
+        else:
+            # Normal mode or with other flight threads
+            # Wait for waypoints completion
+            self._logger.info("Waiting for waypoints completion...")
+            while not self._waypoints_complete.is_set() and \
+                not self._shutdown_event.is_set():
+                self._waypoints_complete.wait(timeout=1.0)
+            # Check if we should proceed with RTL
+            if self._shutdown_event.is_set():
+                raise RuntimeError(
+                    "RTL interrupted by shutdown during waypoints wait"
+                )
+            # Check if vehicle is in GUIDED mode before RTL
+            current_mode = self._vehicle.mode.name
+            if current_mode != "GUIDED":
+                self._logger.warning(
+                    f"Vehicle not in GUIDED mode (currently {current_mode}). "
+                    f"Cannot start RTL safely."
+                )
+                self._return_to_launch_active = False
+                raise RuntimeError(
+                    f"Vehicle not in GUIDED mode: {current_mode}"
+                )
         
         self._logger.info("Starting return to launch")
         # Set vehicle mode to RTL
@@ -1975,45 +2009,6 @@ class SimplePayloadDrone:
         # Wait for synchronized start signal
         self._start_event.wait()
         self._logger.info("Return to launch worker ready to begin processing")
-        
-        if self._vehicle is None:
-            self._return_to_launch_active = False
-            raise RuntimeError("Vehicle is None")
-
-        # Wait for appropriate trigger based on running threads
-        if self.debug_rtl and not self.debug_takeoff and \
-            not self.debug_goto_waypoints:
-            # Debug RTL only (no takeoff or waypoints)
-            # Wait for vehicle to be ready (GUIDED mode)
-            self._logger.info(
-                "Return to launch worker waiting for vehicle to be ready..."
-            )
-            while self._return_to_launch_active and \
-                not self._shutdown_event.is_set():
-                current_mode = self._vehicle.mode.name
-                if current_mode == "GUIDED":
-                    self._logger.info("Vehicle is ready - in GUIDED mode")
-                    break
-                else:
-                    self._logger.debug(
-                        f"Waiting for GUIDED mode (currently {current_mode})"
-                    )
-                    time.sleep(0.5)  # Check every 500ms
-        else:
-            # Normal mode or with other flight threads
-            # Wait for waypoints completion
-            self._logger.info(
-                "Return to launch worker waiting for waypoints completion..."
-            )
-            while not self._waypoints_complete.is_set() and \
-                not self._shutdown_event.is_set():
-                self._waypoints_complete.wait(timeout=1.0)
-            # Check if we should proceed with RTL
-            if self._shutdown_event.is_set():
-                self._logger.info(
-                    "Return to launch worker interrupted during waypoints wait"
-                )
-                return # Exit the worker
         
         try:
             # Execute return to launch using helper function
