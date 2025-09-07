@@ -39,6 +39,8 @@ class Detection:
     })
         
 class SimplePayloadDrone:
+    _geodesic = Geodesic.WGS84
+    
     def __init__(self, args: argparse.Namespace):
         
         # Logger
@@ -658,8 +660,8 @@ class SimplePayloadDrone:
     ### Flight helper functions ###
     ###############################
 
-    @staticmethod
-    def _get_distance_metres(aLocation1, aLocation2) -> float:
+    @classmethod
+    def _get_distance_metres(cls, aLocation1, aLocation2) -> float:
         """
         Return the ground distance in metres between two LocationGlobal objects.
 
@@ -674,9 +676,8 @@ class SimplePayloadDrone:
         Returns:
             float: Distance in metres between the two locations
         """
-        # Calculate geodesic distance using WGS84 ellipsoid
-        geod = Geodesic.WGS84
-        result = geod.Inverse(
+        # Calculate geodesic distance using cached WGS84 ellipsoid
+        result = cls._geodesic.Inverse(
             aLocation1.lat, 
             aLocation1.lon, 
             aLocation2.lat, 
@@ -721,6 +722,12 @@ class SimplePayloadDrone:
         if self._vehicle is None:
             self._goto_waypoints_active = False
             raise RuntimeError("Vehicle is None")
+        
+        # Set vehicle to GUIDED mode for navigation
+        self._logger.info(
+            "Setting vehicle mode to GUIDED for waypoint navigation"
+        )
+        self._vehicle.mode = VehicleMode("GUIDED")
         # Get current position and calculate initial distance
         currentLocation = self._vehicle.location.global_relative_frame
         targetDistance = self._get_distance_metres(
@@ -736,10 +743,11 @@ class SimplePayloadDrone:
         # Monitor progress until arrival or shutdown
         reached_target = False
         while self._goto_waypoints_active and not self._shutdown_event.is_set():
-            # Check vehicle mode and handle appropriately
+            # Check vehicle mode - 
+            # only GUIDED is acceptable once navigation started
             current_mode = self._vehicle.mode.name
             if current_mode == "GUIDED":
-                # Expected mode - log for debugging
+                # Expected mode - continue navigation
                 self._logger.debug(f"Vehicle in GUIDED mode")
             else:
                 self._logger.warning(
