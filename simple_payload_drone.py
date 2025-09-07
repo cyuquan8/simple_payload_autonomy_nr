@@ -169,6 +169,7 @@ class SimplePayloadDrone:
         # Drone parameters
         self.drone_id = args.drone_id
         # RTL parameters
+        self.rtl_alt = args.rtl_alt
         self.rtl_landing_alt = args.rtl_landing_alt
         # Takeoff parameters
         self.takeoff_alt_threshold = args.takeoff_alt_threshold
@@ -997,6 +998,9 @@ class SimplePayloadDrone:
                 )
         
         self._logger.info("Starting return to launch")
+        # Set RTL altitude parameter
+        self._logger.info(f"Setting RTL altitude to {self.rtl_alt}m")
+        self._vehicle.parameters['RTL_ALT'] = self.rtl_alt * 100 # Convert to cm
         # Set vehicle mode to RTL
         self._vehicle.mode = VehicleMode("RTL")
         # Monitor landing progress
@@ -2587,6 +2591,12 @@ def get_args() -> argparse.Namespace:
     )
 
     # RTL parameters
+    parser.add_argument(
+        "--rtl-alt",
+        default=30.0,
+        help="RTL altitude in meters above home location",
+        type=float
+    )
     parser.add_argument(
         "--rtl-landing-alt",
         default=0.05,
