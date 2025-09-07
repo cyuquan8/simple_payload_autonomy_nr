@@ -15,6 +15,7 @@ import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from dronekit import connect, VehicleMode, LocationGlobalRelative
+from geographiclib.geodesic import Geodesic
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -662,9 +663,9 @@ class SimplePayloadDrone:
         """
         Return the ground distance in metres between two LocationGlobal objects.
 
-        This method is an approximation, and will not be accurate over large 
-        distances and close to the earth's poles. It comes from the ArduPilot 
-        test code.
+        Uses GeographicLib for highest precision geodesic distance calculation,
+        accounting for Earth's ellipsoidal shape. Accurate for any distance 
+        and location on Earth.
         
         Args:
             aLocation1: First LocationGlobal object
@@ -673,9 +674,17 @@ class SimplePayloadDrone:
         Returns:
             float: Distance in metres between the two locations
         """
-        dlat = aLocation2.lat - aLocation1.lat
-        dlong = aLocation2.lon - aLocation1.lon
-        return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
+        # Calculate geodesic distance using WGS84 ellipsoid
+        geod = Geodesic.WGS84
+        result = geod.Inverse(
+            aLocation1.lat, 
+            aLocation1.lon, 
+            aLocation2.lat, 
+            aLocation2.lon
+        )
+        
+        # Return distance in metres
+        return result['s12']
     
     def _goto_waypoint(
             self, 
