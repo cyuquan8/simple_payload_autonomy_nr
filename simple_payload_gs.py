@@ -9,7 +9,7 @@ import threading
 import time
 
 from datetime import datetime
-from message_types import MessageType, TakeoffStatus
+from message_types import MessageType, RTLStatus, TakeoffStatus
 from typing import Any
 
 class SimplePayloadGroundStation:
@@ -197,6 +197,43 @@ class SimplePayloadGroundStation:
         else:
             self._logger.debug("No image data in message")
     
+    def _process_rtl_message(self, message: dict) -> None:
+        """
+        Process an RTL message from the drone.
+        
+        Args:
+            message: Decoded RTL message dictionary
+            
+        Returns:
+            None
+        """
+        # Extract message components
+        drone_id = message.get('id', 'unknown')
+        status = message.get('status', 'unknown')
+        alt = message.get('altitude', 'unknown')
+        timestamp = message.get('timestamp', 'unknown')
+        # Log RTL information based on status
+        if status == RTLStatus.STARTED:
+            self._logger.info(
+                f"[ID: {drone_id}] RTL STARTED - Current altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        elif status == RTLStatus.COMPLETED:
+            self._logger.info(
+                f"[ID: {drone_id}] RTL COMPLETED - Landing altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        elif status == RTLStatus.ABORTED:
+            self._logger.warning(
+                f"[ID: {drone_id}] RTL ABORTED - Altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        else:
+            self._logger.warning(
+                f"[ID: {drone_id}] Unknown RTL status: {status} "
+                f"- Altitude: {alt}m (time: {timestamp})"
+            )
+
     def _process_takeoff_message(self, message: dict) -> None:
         """
         Process a takeoff message from the drone.
@@ -418,6 +455,8 @@ class SimplePayloadGroundStation:
                     self._process_telemetry_message(message)
                 elif message_type == MessageType.TAKEOFF:
                     self._process_takeoff_message(message)
+                elif message_type == MessageType.RTL:
+                    self._process_rtl_message(message)
                 else:
                     self._logger.warning(
                         f"Unknown message type: {message_type}"

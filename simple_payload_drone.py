@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from dronekit import connect, LocationGlobalRelative, VehicleMode
 from geographiclib.geodesic import Geodesic
-from message_types import MessageType, TakeoffStatus
+from message_types import MessageType, RTLStatus, TakeoffStatus 
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -677,6 +677,46 @@ class SimplePayloadDrone:
         # Return distance in metres
         return result['s12']
     
+    def _get_rtl_payload(
+            self, 
+            status: RTLStatus, 
+            altitude: float
+        ) -> dict[str, Any]:
+        """
+        Create RTL message payload.
+        
+        Args:
+            status: RTL status from RTLStatus enum
+            altitude: Current altitude in meters
+            
+        Returns:
+            dict[str, Any]: RTL payload dictionary
+        """
+        return {
+            'status': status,
+            'altitude': altitude,
+        }
+
+    def _get_takeoff_payload(
+            self, 
+            status: TakeoffStatus, 
+            altitude: float
+        ) -> dict[str, Any]:
+        """
+        Create takeoff message payload.
+        
+        Args:
+            status: Takeoff status from TakeoffStatus enum
+            altitude: Current or target altitude in meters
+            
+        Returns:
+            dict[str, Any]: Takeoff payload dictionary
+        """
+        return {
+            'status': status,
+            'altitude': altitude,
+        }
+
     def _goto_waypoint(
             self, 
             targetLocation: LocationGlobalRelative, 
@@ -986,32 +1026,70 @@ class SimplePayloadDrone:
                     f"Vehicle not in GUIDED mode: {current_mode}"
                 )
         
+        # RTL
         self._logger.info("Starting return to launch")
         # Set RTL altitude parameter
         self._logger.info(f"Setting RTL altitude to {self.rtl_alt}m")
         self._vehicle.parameters['RTL_ALT'] = self.rtl_alt * 100 # Convert to cm
         # Set vehicle mode to RTL
         self._vehicle.mode = VehicleMode("RTL")
+        # Send RTL started message to ground station
+        if self.udp_pub:
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            rtl_payload = self._get_rtl_payload(
+                RTLStatus.STARTED, 
+                current_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.RTL, 
+                rtl_payload
+            )
+            self._enqueue_message(message_bytes)
+        
         # Monitor landing progress
         while self._return_to_launch_active and \
             not self._shutdown_event.is_set():
+            # Get current altitude first
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
             # Check if vehicle is still in RTL mode
             current_mode = self._vehicle.mode.name
             if current_mode != "RTL":
                 self._logger.warning(
                     f"RTL warning - vehicle changed to {current_mode} mode"
                 )
-            current_altitude = self._vehicle.location.global_relative_frame.alt
-            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
             # Check if we've reached near-ground altitude (landing complete)
             if current_altitude <= self.rtl_landing_alt:
                 self._logger.info(
                     f"Landing completed: {current_altitude:.2f}m"
                 )
-                break
+                # Send RTL completed message to ground station
+                if self.udp_pub:
+                    rtl_payload = self._get_rtl_payload(
+                        RTLStatus.COMPLETED, 
+                        current_altitude
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.RTL, 
+                        rtl_payload
+                    )
+                    self._enqueue_message(message_bytes)
+                return
             time.sleep(0.5)  # Check every 500ms
         
-        # Check for interruption and raise exception if needed
+        # If we reach here, RTL was interrupted (mode change or shutdown)
+        # Send abort message with current altitude
+        if self.udp_pub:
+            rtl_payload = self._get_rtl_payload(
+                RTLStatus.ABORTED, 
+                current_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.RTL, 
+                rtl_payload
+            )
+            self._enqueue_message(message_bytes)
+        # Raise appropriate exception message
         if not self._return_to_launch_active:
             msg = "Return to launch interrupted due to mode change"
             self._logger.warning(msg)
@@ -1270,26 +1348,6 @@ class SimplePayloadDrone:
     ################################
     ### Vehicle helper functions ###
     ################################
-
-    def _get_takeoff_payload(
-            self, 
-            status: TakeoffStatus, 
-            altitude: float
-        ) -> dict[str, Any]:
-        """
-        Create takeoff message payload.
-        
-        Args:
-            status: Takeoff status from TakeoffStatus enum
-            altitude: Current or target altitude in meters
-            
-        Returns:
-            dict[str, Any]: Takeoff payload dictionary
-        """
-        return {
-            'status': status,
-            'altitude': altitude,
-        }
 
     def _get_telemetry_payload(self) -> dict[str, Any] | None:
         """
