@@ -9,6 +9,7 @@ import threading
 import time
 
 from datetime import datetime
+from message_types import MessageType, TakeoffStatus
 from typing import Any
 
 class SimplePayloadGroundStation:
@@ -196,6 +197,43 @@ class SimplePayloadGroundStation:
         else:
             self._logger.debug("No image data in message")
     
+    def _process_takeoff_message(self, message: dict) -> None:
+        """
+        Process a takeoff message from the drone.
+        
+        Args:
+            message: Decoded takeoff message dictionary
+            
+        Returns:
+            None
+        """
+        # Extract message components
+        drone_id = message.get('id', 'unknown')
+        status = message.get('status', 'unknown')
+        alt = message.get('altitude', 'unknown')
+        timestamp = message.get('timestamp', 'unknown')
+        # Log takeoff information based on status
+        if status == TakeoffStatus.STARTED:
+            self._logger.info(
+                f"[ID: {drone_id}] Takeoff STARTED - Target altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        elif status == TakeoffStatus.COMPLETED:
+            self._logger.info(
+                f"[ID: {drone_id}] Takeoff COMPLETED - Final altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        elif status == TakeoffStatus.ABORTED:
+            self._logger.warning(
+                f"[ID: {drone_id}] Takeoff ABORTED - Altitude: {alt}m "
+                f"(time: {timestamp})"
+            )
+        else:
+            self._logger.warning(
+                f"[ID: {drone_id}] Unknown takeoff status: {alt} "
+                f"- Altitude: {alt}m (time: {timestamp})"
+            )
+
     def _process_telemetry_message(self, message: dict) -> None:
         """
         Process a telemetry message from the drone.
@@ -373,11 +411,13 @@ class SimplePayloadGroundStation:
                     continue
                 
                 # Handle message based on type
-                message_type = message.get('type', 'unknown')
-                if message_type == 'detection':
+                message_type = message.get('type', MessageType.UNKNOWN)
+                if message_type == MessageType.DETECTION:
                     self._process_detection_message(message)
-                elif message_type == 'telemetry':
+                elif message_type == MessageType.TELEMETRY:
                     self._process_telemetry_message(message)
+                elif message_type == MessageType.TAKEOFF:
+                    self._process_takeoff_message(message)
                 else:
                     self._logger.warning(
                         f"Unknown message type: {message_type}"

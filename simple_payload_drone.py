@@ -14,8 +14,9 @@ import socket
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from dronekit import connect, VehicleMode, LocationGlobalRelative
+from dronekit import connect, LocationGlobalRelative, VehicleMode
 from geographiclib.geodesic import Geodesic
+from message_types import MessageType, TakeoffStatus
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -270,14 +271,14 @@ class SimplePayloadDrone:
     ### Detection Helper Functions ###
     ##################################
     
-    def _encode_detection_message(
+    def _get_detection_payload(
             self, 
             detections: list[Detection], 
             image: np.ndarray,
             location: dict[str, Any],
-        ) -> bytes:
+        ) -> dict[str, Any]:
         """
-        Encode detections and image into bytes for UDP transmission.
+        Create detection message payload with encoded image and detection data.
         
         Args:
             detections: List of Detection objects to encode
@@ -285,7 +286,7 @@ class SimplePayloadDrone:
             location: Dictionary containing location data (lat, lon, alt)
             
         Returns:
-            bytes: JSON-encoded message as bytes for UDP transmission
+            dict[str, Any]: Detection payload dictionary
         """
         # Convert BGR to RGB for correct color encoding
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -315,23 +316,11 @@ class SimplePayloadDrone:
                 'pred_loc': d.pred_loc, # dict with predicted GPS coordinates
             })
         
-        # Create message payload
-        message = {
-            'type': 'detection',
-            'id': self.drone_id,
+        return {
             'detections': detection_data,
             'image': img_base64,
             'location': location,
-            'timestamp': datetime.now().isoformat(),
         }
-        
-        # Convert to JSON and encode as bytes
-        message_bytes = json.dumps(message).encode('utf-8')
-        self._logger.debug(
-            f"Total UDP message size: {len(message_bytes):,} bytes"
-        )
-        
-        return message_bytes
     
     def _get_detection_predicted_location(
             self, 
@@ -1102,10 +1091,26 @@ class SimplePayloadDrone:
                 "Takeoff interrupted by shutdown while waiting for GUIDED mode"
             )
         
+        # Takeoff
         self._logger.info(f"Taking off to {target_altitude}m altitude!")
         self._vehicle.simple_takeoff(target_altitude)
+        # Send takeoff started message to ground station
+        if self.udp_pub:
+            takeoff_payload = self._get_takeoff_payload(
+                TakeoffStatus.STARTED, 
+                target_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.TAKEOFF, 
+                takeoff_payload
+            )
+            self._enqueue_message(message_bytes)
+
         # Monitor altitude progress
         while self._takeoff_active and not self._shutdown_event.is_set():
+            # Get current altitude first
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
             # Check if vehicle is still in GUIDED mode
             current_mode = self._vehicle.mode.name
             if current_mode != "GUIDED":
@@ -1114,18 +1119,39 @@ class SimplePayloadDrone:
                 )
                 self._takeoff_active = False
                 break
-            current_altitude = self._vehicle.location.global_relative_frame.alt
-            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
             # Check if we've reached threshold percentage of target altitude
             if current_altitude >= \
                 target_altitude * self.takeoff_alt_threshold:
                 self._logger.info(
                     f"Reached target altitude: {current_altitude:.2f}m"
                 )
-                break
+                # Send takeoff completed message to ground station
+                if self.udp_pub:
+                    takeoff_payload = self._get_takeoff_payload(
+                        TakeoffStatus.COMPLETED, 
+                        current_altitude
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.TAKEOFF, 
+                        takeoff_payload
+                    )
+                    self._enqueue_message(message_bytes)
+                return
             time.sleep(0.5) # Check every 500ms
         
-        # Check for interruption and raise exception if needed
+        # If we reach here, takeoff was interrupted (mode change or shutdown)
+        # Send abort message with current altitude
+        if self.udp_pub:
+            takeoff_payload = self._get_takeoff_payload(
+                TakeoffStatus.ABORTED, 
+                current_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.TAKEOFF, 
+                takeoff_payload
+            )
+            self._enqueue_message(message_bytes)
+        # Raise appropriate exception message
         if not self._takeoff_active:
             msg = "Takeoff interrupted due to mode change"
             self._logger.warning(msg)
@@ -1164,6 +1190,39 @@ class SimplePayloadDrone:
         except Exception as e:
             self._logger.debug(f"Failed to dequeue message: {e}")
             return None
+
+    def _encode_message(
+            self, 
+            message_type: MessageType,
+            payload: dict[str, Any]
+        ) -> bytes:
+        """
+        Generic function to encode messages with common fields for UDP 
+        transmission.
+        
+        Args:
+            message_type: Type of message from MessageType enum
+            payload: Dictionary containing message-specific data
+            
+        Returns:
+            bytes: JSON-encoded message as bytes for UDP transmission
+        """
+        # Create message with common fields
+        message = {
+            'id': self.drone_id,
+            'timestamp': datetime.now().isoformat(),
+            'type': message_type,
+            **payload  # Unpack payload data into message
+        }
+        
+        # Convert to JSON and encode as bytes
+        message_bytes = json.dumps(message).encode('utf-8')
+        self._logger.debug(
+            f"{message_type.capitalize()} message size: "
+            f"{len(message_bytes):,} bytes"
+        )
+        
+        return message_bytes
 
     def _enqueue_message(self, message: bytes) -> None:
         """
@@ -1212,34 +1271,27 @@ class SimplePayloadDrone:
     ### Vehicle helper functions ###
     ################################
 
-    def _encode_telemetry_message(
+    def _get_takeoff_payload(
             self, 
-            telemetry_data: dict[str, Any]
-        ) -> bytes:
+            status: TakeoffStatus, 
+            altitude: float
+        ) -> dict[str, Any]:
         """
-        Encode telemetry data into bytes for UDP transmission.
+        Create takeoff message payload.
         
         Args:
-            telemetry_data: Dictionary containing telemetry data
+            status: Takeoff status from TakeoffStatus enum
+            altitude: Current or target altitude in meters
             
         Returns:
-            bytes: JSON-encoded telemetry message as bytes for UDP transmission
+            dict[str, Any]: Takeoff payload dictionary
         """
-        # Create message payload
-        message = {
-            'type': 'telemetry',
-            **telemetry_data # Unpack telemetry data into message
+        return {
+            'status': status,
+            'altitude': altitude,
         }
-        
-        # Convert to JSON and encode as bytes
-        message_bytes = json.dumps(message).encode('utf-8')
-        self._logger.debug(
-            f"Telemetry message size: {len(message_bytes):,} bytes"
-        )
-        
-        return message_bytes
 
-    def _get_telemetry_data(self) -> dict[str, Any] | None:
+    def _get_telemetry_payload(self) -> dict[str, Any] | None:
         """
         Get current vehicle telemetry data if vehicle is connected.
         
@@ -1258,8 +1310,6 @@ class SimplePayloadDrone:
             attitude = self._vehicle.attitude
             
             return {
-                'id': self.drone_id,
-                'timestamp': datetime.now().isoformat(),
                 'mode': self._vehicle.mode.name,
                 'armed': self._vehicle.armed,
                 'location': {
@@ -1901,11 +1951,15 @@ class SimplePayloadDrone:
                         relevant_detections,
                         current_image
                     )
-                    # Encode message with detections, image, and location
-                    message_bytes = self._encode_detection_message(
+                    # Create detection payload and encode message
+                    detection_payload = self._get_detection_payload(
                         relevant_detections, 
                         annotated_image,
                         vehicle_location
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.DETECTION, 
+                        detection_payload
                     )
                     # Add to message queue based on blocking configuration
                     self._enqueue_message(message_bytes)
@@ -2123,14 +2177,15 @@ class SimplePayloadDrone:
         
         while self._telemetry_active and not self._shutdown_event.is_set():
             try:
-                telemetry_data = self._get_telemetry_data()
-                if telemetry_data is not None:
+                telemetry_payload = self._get_telemetry_payload()
+                if telemetry_payload is not None:
                     # Log telemetry data
-                    self._logger.debug(f"Telemetry data: {telemetry_data}")
+                    self._logger.debug(f"Telemetry data: {telemetry_payload}")
                     # Send to message queue for UDP publishing if enabled
                     if self.udp_pub:
-                        message_bytes = self._encode_telemetry_message(
-                            telemetry_data
+                        message_bytes = self._encode_message(
+                            MessageType.TELEMETRY, 
+                            telemetry_payload
                         )
                         self._enqueue_message(message_bytes)
                 
