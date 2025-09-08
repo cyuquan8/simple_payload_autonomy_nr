@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from dronekit import connect, LocationGlobalRelative, VehicleMode
 from geographiclib.geodesic import Geodesic
-from message_types import MessageType, RTLStatus, TakeoffStatus 
+from message_types import MessageType, RTLStatus, TakeoffStatus, WaypointStatus 
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -715,6 +715,35 @@ class SimplePayloadDrone:
         return {
             'status': status,
             'altitude': altitude,
+        }
+
+    def _get_waypoint_payload(
+            self, 
+            status: WaypointStatus, 
+            waypoint_index: int,
+            total_waypoints: int,
+            lat: float,
+            lon: float
+        ) -> dict[str, Any]:
+        """
+        Create waypoint message payload.
+        
+        Args:
+            status: Waypoint status from WaypointStatus enum
+            waypoint_index: Current waypoint index (1-based)
+            total_waypoints: Total number of waypoints
+            lat: Waypoint latitude
+            lon: Waypoint longitude
+            
+        Returns:
+            dict[str, Any]: Waypoint payload dictionary
+        """
+        return {
+            'status': status,
+            'waypoint_index': waypoint_index,
+            'total_waypoints': total_waypoints,
+            'lat': lat,
+            'lon': lon,
         }
 
     def _goto_waypoint(
@@ -2101,19 +2130,79 @@ class SimplePayloadDrone:
         for i, (wp, speed) in enumerate(self._wpt_goto_list):
             # Check for shutdown between waypoints
             if not self._goto_waypoints_active or self._shutdown_event.is_set():
-                self._logger.info(f"Navigation interrupted at waypoint {i+1}")
+                self._logger.info(
+                    f"Navigation interrupted by shutdown at waypoint {i+1}"
+                )
+                # Send waypoint aborted message to ground station
+                if self.udp_pub:
+                    waypoint_payload = self._get_waypoint_payload(
+                        WaypointStatus.ABORTED,
+                        i + 1, # Convert to 1-based index
+                        len(self._wpt_goto_list),
+                        wp.lat,
+                        wp.lon
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.WAYPOINT,
+                        waypoint_payload
+                    )
+                    self._enqueue_message(message_bytes)
                 break
             try:
+                # Send waypoint started message to ground station
+                if self.udp_pub:
+                    waypoint_payload = self._get_waypoint_payload(
+                        WaypointStatus.STARTED,
+                        i + 1,  # Convert to 1-based index
+                        len(self._wpt_goto_list),
+                        wp.lat,
+                        wp.lon
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.WAYPOINT,
+                        waypoint_payload
+                    )
+                    self._enqueue_message(message_bytes)
+                # Goto waypint
                 self._logger.info(
                     f"Navigating to waypoint {i+1}/{len(self._wpt_goto_list)}: "
                     f"{wp} at {speed} m/s"
                 )
                 self._goto_waypoint(wp, speed)
+                # Send waypoint completed message to ground station
+                if self.udp_pub:
+                    waypoint_payload = self._get_waypoint_payload(
+                        WaypointStatus.COMPLETED,
+                        i + 1,  # Convert to 1-based index
+                        len(self._wpt_goto_list),
+                        wp.lat,
+                        wp.lon
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.WAYPOINT,
+                        waypoint_payload
+                    )
+                    self._enqueue_message(message_bytes)
+                
                 self._logger.info(
                     f"Reached waypoint {i+1}/{len(self._wpt_goto_list)}"
                 )
             except Exception as e:
                 self._logger.error(f"Error navigating to waypoint {i+1}: {e}")
+                # Send waypoint aborted message to ground station
+                if self.udp_pub:
+                    waypoint_payload = self._get_waypoint_payload(
+                        WaypointStatus.ABORTED,
+                        i + 1,  # Convert to 1-based index
+                        len(self._wpt_goto_list),
+                        wp.lat,
+                        wp.lon
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.WAYPOINT,
+                        waypoint_payload
+                    )
+                    self._enqueue_message(message_bytes)
                 # Stop waypoint mission on error for safety
                 self._goto_waypoints_active = False
                 break

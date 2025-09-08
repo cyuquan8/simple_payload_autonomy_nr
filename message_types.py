@@ -31,6 +31,5 @@ class RTLStatus(StrEnum):
 class WaypointStatus(StrEnum):
     """Waypoint navigation status values."""
     STARTED = auto()
-    REACHED = auto()
     COMPLETED = auto()
     ABORTED = auto()

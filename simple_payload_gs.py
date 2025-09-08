@@ -9,7 +9,7 @@ import threading
 import time
 
 from datetime import datetime
-from message_types import MessageType, RTLStatus, TakeoffStatus
+from message_types import MessageType, RTLStatus, TakeoffStatus, WaypointStatus
 from typing import Any
 
 class SimplePayloadGroundStation:
@@ -232,6 +232,48 @@ class SimplePayloadGroundStation:
             self._logger.warning(
                 f"[ID: {drone_id}] Unknown RTL status: {status} "
                 f"- Altitude: {alt}m (time: {timestamp})"
+            )
+
+    def _process_waypoint_message(self, message: dict) -> None:
+        """
+        Process a waypoint message from the drone.
+        
+        Args:
+            message: Decoded waypoint message dictionary
+            
+        Returns:
+            None
+        """
+        # Extract message components
+        drone_id = message.get('id', 'unknown')
+        status = message.get('status', 'unknown')
+        waypoint_index = message.get('waypoint_index', 'unknown')
+        total_waypoints = message.get('total_waypoints', 'unknown')
+        lat = message.get('lat', 'unknown')
+        lon = message.get('lon', 'unknown')
+        timestamp = message.get('timestamp', 'unknown')
+        
+        # Log waypoint information based on status
+        if status == WaypointStatus.STARTED:
+            self._logger.info(
+                f"[ID: {drone_id}] Waypoint {waypoint_index}/{total_waypoints} "
+                f"STARTED - Target: ({lat}, {lon}) (time: {timestamp})"
+            )
+        elif status == WaypointStatus.COMPLETED:
+            self._logger.info(
+                f"[ID: {drone_id}] Waypoint {waypoint_index}/{total_waypoints} "
+                f"COMPLETED - Location: ({lat}, {lon}) (time: {timestamp})"
+            )
+        elif status == WaypointStatus.ABORTED:
+            self._logger.warning(
+                f"[ID: {drone_id}] Waypoint {waypoint_index}/{total_waypoints} "
+                f"ABORTED - Location: ({lat}, {lon}) (time: {timestamp})"
+            )
+        else:
+            self._logger.warning(
+                f"[ID: {drone_id}] Unknown waypoint status: {status} "
+                f"- Waypoint {waypoint_index}/{total_waypoints} at "
+                f"({lat}, {lon}) (time: {timestamp})"
             )
 
     def _process_takeoff_message(self, message: dict) -> None:
@@ -457,6 +499,8 @@ class SimplePayloadGroundStation:
                     self._process_takeoff_message(message)
                 elif message_type == MessageType.RTL:
                     self._process_rtl_message(message)
+                elif message_type == MessageType.WAYPOINT:
+                    self._process_waypoint_message(message)
                 else:
                     self._logger.warning(
                         f"Unknown message type: {message_type}"
