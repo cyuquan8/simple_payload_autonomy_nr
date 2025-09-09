@@ -149,6 +149,10 @@ class SimplePayloadDrone:
         self.udp_queue_block = args.udp_queue_block
         self.udp_queue_timeout = args.udp_queue_timeout
         self.udp_queue_maxsize = args.udp_queue_maxsize
+        self.vehicle_connection_max_attempts = \
+            args.vehicle_connection_max_attempts
+        self.vehicle_connection_wait_ready_timeout = \
+            args.vehicle_connection_wait_ready_timeout
         # Debug parameters
         self.debug_camera = args.debug_camera
         self.debug_detect = args.debug_detect
@@ -226,14 +230,36 @@ class SimplePayloadDrone:
         self._rtl_complete = threading.Event()
         
         # Setup comms
+        self._vehicle = None
         if not args.debug_detect_no_vehicle:
-            self._vehicle=connect(
-                self.rpi_serial_port, 
-                wait_ready=True, 
-                baud=self.rpi_baud_rate
-            )
-        else:
-            self._vehicle = None
+            connection_attempts = 0
+            max_attempts = self.vehicle_connection_max_attempts
+            timeout = self.vehicle_connection_wait_ready_timeout
+            while self._vehicle is None:
+                try:
+                    connection_attempts += 1
+                    self._logger.info(
+                        f"Attempting vehicle connection "
+                        f"(attempt {connection_attempts}/{max_attempts})..."
+                    )
+                    self._vehicle = connect(
+                        self.rpi_serial_port, 
+                        wait_ready=False, 
+                        baud=self.rpi_baud_rate
+                    )
+                    self._vehicle.wait_ready(True, timeout=timeout)
+                    self._logger.info("Vehicle connected successfully")
+                except Exception as e:
+                    self._logger.warning(f"Vehicle connection failed: {e}")
+                    if connection_attempts >= max_attempts:
+                        self._logger.error(
+                            f"Max connection attempts ({max_attempts}) reached"
+                        )
+                        raise RuntimeError(
+                            "Failed to connect to vehicle after maximum attempts"
+                        )
+                    self._logger.info("Retrying connection in 3 seconds...")
+                    time.sleep(3) # Wait before retry
         # Setup servo
         self._pwm = HardwarePWM(0, 50) # 50 Hz for servo
         # Setup UDP socket
@@ -2680,7 +2706,7 @@ def get_args() -> argparse.Namespace:
         type=float,
     )
 
-    # Comms parameters
+    # Connection / Comms parameters
     parser.add_argument(
         "--rpi-baud-rate",
         default=57600,
@@ -2743,6 +2769,18 @@ def get_args() -> argparse.Namespace:
             "(None = no timeout, only used when blocking is enabled)"
         ),
         type=lambda x: None if x.lower() == 'none' else float(x)
+    )
+    parser.add_argument(
+        "--vehicle-connection-max-attempts",
+        default=10,
+        help="Maximum attempts to connect to vehicle before failing",
+        type=int
+    )
+    parser.add_argument(
+        "--vehicle-connection-wait-ready-timeout",
+        default=60,
+        help="Timeout in seconds for vehicle wait_ready operation",
+        type=int
     )
 
     # Detection parameters
