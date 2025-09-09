@@ -2721,7 +2721,7 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--udp-image-quality",
-        default=30,
+        default=10,
         help=(
             "JPEG quality for UDP image transmission" 
             "(1-100, higher = better quality but larger size)"
