@@ -14,16 +14,23 @@ class MessageType(StrEnum):
     TAKEOFF = auto()
     RTL = auto()
     WAYPOINT = auto()
+    LAND = auto()
     UNKNOWN = auto()
 
-class TakeoffStatus(StrEnum):
-    """Takeoff operation status values."""
+class LandStatus(StrEnum):
+    """Land operation status values."""
     STARTED = auto()
     COMPLETED = auto()
     ABORTED = auto()
 
 class RTLStatus(StrEnum):
     """Return to Launch operation status values."""
+    STARTED = auto()
+    COMPLETED = auto()
+    ABORTED = auto()
+
+class TakeoffStatus(StrEnum):
+    """Takeoff operation status values."""
     STARTED = auto()
     COMPLETED = auto()
     ABORTED = auto()
