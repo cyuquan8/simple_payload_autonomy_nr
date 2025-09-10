@@ -675,25 +675,6 @@ class SimplePayloadGroundStation:
     ################################
     ### Thread handler functions ###
     ################################
-    
-    def _cleanup_resources(self) -> None:
-        """
-        Private helper to cleanup ground station resources and stop 
-        background threads.
-        
-        Args:
-            None
-            
-        Returns:
-            None
-        """
-        self._logger.info("Cleaning up ground station resources...")
-        self._stop_threads()
-        if hasattr(self, '_sock') and self._sock:
-            self._sock.close()
-            self._logger.info("Closed UDP socket")
-        self._shutdown_event.clear()
-        self._logger.info("Ground station cleanup complete")
 
     def _start_socketio_server_thread(self) -> None:
         """
@@ -947,6 +928,24 @@ class SimplePayloadGroundStation:
     ### Exposed functions ###
     #########################
     
+    def cleanup(self) -> None:
+        """
+        Cleanup ground station resources and stop background threads.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Cleaning up ground station resources...")
+        self._stop_threads()
+        if hasattr(self, '_sock') and self._sock:
+            self._sock.close()
+            self._logger.info("Closed UDP socket")
+        self._shutdown_event.clear()
+        self._logger.info("Ground station cleanup complete")
+
     def run(self) -> None:
         """
         Run the ground station. This method blocks until interrupted.
@@ -962,22 +961,11 @@ class SimplePayloadGroundStation:
         )
         
         # Wait for shutdown event while receiver processes messages
+        self._logger.info("Waiting for shutdown signal...")
         self._shutdown_event.wait()
+        self._logger.info("Shutdown signal received, cleaning up...")
         # Automatically cleanup resources when shutdown occurs
-        self._cleanup_resources()
-    
-    def shutdown(self) -> None:
-        """
-        Signal the ground station to shut down gracefully.
-        
-        Args:
-            None
-            
-        Returns:
-            None
-        """
-        self._logger.info("Shutdown requested")
-        self._shutdown_event.set()
+        self.cleanup()
 
     def start(self) -> None:
         """
@@ -1128,10 +1116,10 @@ def main() -> None:
         ground_station.logger.info(
             "Received keyboard interrupt, shutting down..."
         )
-        ground_station.shutdown()
+        ground_station.cleanup()
     except Exception as e:
         ground_station.logger.error(f"Application error: {e}")
-        ground_station.shutdown()
+        ground_station.cleanup()
 
 if __name__ == "__main__":
     main()
