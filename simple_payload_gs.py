@@ -842,17 +842,22 @@ class SimplePayloadGroundStation:
             for cross-thread communication and ensuring proper cleanup.
             """
             # Create isolated event loop for this thread
+            self._logger.info("Creating Socket.IO event loop...")
             self._sio_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._sio_loop)
             try:
                 # Run the async server until completion or cancellation
+                self._logger.info("Starting Socket.IO server event loop...")
                 self._sio_loop.run_until_complete(self._start_socketio_server())
+                self._logger.info("Socket.IO server event loop completed")
             except Exception as e:
                 self._logger.error(f"Socket.IO server error: {e}")
             finally:
                 # Clean up event loop and clear cross-thread reference
+                self._logger.info("Cleaning up Socket.IO event loop...")
                 self._sio_loop.close()
                 self._sio_loop = None  # Prevents further cross-thread calls
+                self._logger.info("Socket.IO event loop cleanup complete")
         
         run_server()
         self._logger.info("Socket.IO server worker stopped")
