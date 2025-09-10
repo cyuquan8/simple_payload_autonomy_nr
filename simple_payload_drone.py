@@ -191,6 +191,7 @@ class SimplePayloadDrone:
         self.takeoff_alt_threshold = args.takeoff_alt_threshold
         self.takeoff_target_alt = args.takeoff_target_alt
         # Telemetry parameters
+        self.telemetry_persist = args.telemetry_persist
         self.telemetry_rate = args.telemetry_rate
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
@@ -1678,35 +1679,6 @@ class SimplePayloadDrone:
     ### Thread handler functions ###
     ################################
 
-    def _cleanup_resources(self) -> None:
-        """
-        Private helper to cleanup drone resources and stop background threads.
-        
-        Args:
-            None
-            
-        Returns:
-            None
-        """
-        self._logger.info("Cleaning up drone resources...")
-        self._stop_threads()
-        if hasattr(self, '_sock') and self._sock:
-            self._sock.close()
-            self._logger.info("Closed UDP socket")
-        if hasattr(self, '_pwm') and self._pwm:
-            self._pwm.stop()
-            self._logger.info("Stopped PWM servo")
-        if hasattr(self, '_vehicle') and self._vehicle:
-            self._vehicle.close()
-            self._logger.info("Closed vehicle connection")
-        self._start_event.clear()
-        self._shutdown_event.clear()
-        # Clear flight sequence coordination events
-        self._takeoff_complete.clear()
-        self._waypoints_complete.clear()
-        self._rtl_or_land_complete.clear()
-        self._logger.info("Drone cleanup complete")
-
     def _start_camera_pitch_worker(self) -> None:
         """
         Start the camera pitch worker thread.
@@ -2176,12 +2148,15 @@ class SimplePayloadDrone:
             self._stop_land_worker()
         if self._takeoff_thread is not None:
             self._stop_takeoff_worker()
-        if self._telemetry_thread is not None:
+        if self._telemetry_thread is not None and not self.telemetry_persist:
             self._stop_telemetry_worker()
-        if self._udp_thread is not None:
+        if self._udp_thread is not None and not self.telemetry_persist:
             self._stop_udp_publisher()
         
-        self._logger.info("All threads stopped")
+        if self.telemetry_persist:
+            self._logger.info("All threads stopped (telemetry and UDP persist)")
+        else:
+            self._logger.info("All threads stopped")
 
     ###############################
     ### Thread worker functions ###
@@ -2478,7 +2453,7 @@ class SimplePayloadDrone:
                 "Goto waypoints worker terminated - "
                 "stopped due to navigation error"
             )
-            self.shutdown()
+            self._shutdown_event.set()
         elif self._shutdown_event.is_set():
             # Shutdown was requested
             self._logger.info(
@@ -2496,7 +2471,7 @@ class SimplePayloadDrone:
             # Check if this is the final flight phase and trigger shutdown
             if self.debug_goto_waypoints and not self.debug_rtl:
                 self._logger.info("Goto waypoints complete - shutting down")
-                self.shutdown()
+                self._shutdown_event.set()
         self._logger.info("Goto waypoints worker stopped")
 
     def _land_worker(self) -> None:
@@ -2522,11 +2497,11 @@ class SimplePayloadDrone:
             self._rtl_or_land_complete.set()  # Signal land completion
             # Land is always the final flight phase - trigger shutdown
             self._logger.info("Land complete - shutting down")
-            self.shutdown()
+            self._shutdown_event.set()
         except Exception as e:
             self._logger.error(f"Error during land: {e}")
             self._land_active = False
-            self.shutdown()
+            self._shutdown_event.set()
         
         self._logger.info("Land worker stopped")
 
@@ -2553,11 +2528,11 @@ class SimplePayloadDrone:
             self._rtl_or_land_complete.set()  # Signal RTL completion
             # RTL is always the final flight phase - trigger shutdown
             self._logger.info("Return to launch complete - shutting down")
-            self.shutdown()
+            self._shutdown_event.set()
         except Exception as e:
             self._logger.error(f"Error during return to launch: {e}")
             self._return_to_launch_active = False
-            self.shutdown()
+            self._shutdown_event.set()
             # Don't set rtl_complete on failure
         
         self._logger.info("Return to launch worker stopped")
@@ -2588,11 +2563,11 @@ class SimplePayloadDrone:
                 not self.debug_goto_waypoints and 
                 not self.debug_rtl):
                 self._logger.info("Takeoff-only mode complete - shutting down")
-                self.shutdown()
+                self._shutdown_event.set()
         except Exception as e:
             self._logger.error(f"Error during takeoff: {e}")
             self._takeoff_active = False
-            self.shutdown()
+            self._shutdown_event.set()
             # Don't set takeoff_complete on failure
         
         self._logger.info("Takeoff worker stopped")
@@ -2692,6 +2667,35 @@ class SimplePayloadDrone:
     ### Exposed functions ###
     #########################
     
+    def cleanup(self) -> None:
+        """
+        Cleanup drone resources and stop background threads.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Cleaning up drone resources...")
+        self._stop_threads()
+        if hasattr(self, '_sock') and self._sock:
+            self._sock.close()
+            self._logger.info("Closed UDP socket")
+        if hasattr(self, '_pwm') and self._pwm:
+            self._pwm.stop()
+            self._logger.info("Stopped PWM servo")
+        if hasattr(self, '_vehicle') and self._vehicle:
+            self._vehicle.close()
+            self._logger.info("Closed vehicle connection")
+        self._start_event.clear()
+        self._shutdown_event.clear()
+        # Clear flight sequence coordination events
+        self._takeoff_complete.clear()
+        self._waypoints_complete.clear()
+        self._rtl_or_land_complete.clear()
+        self._logger.info("Drone cleanup complete")
+
     def run(self) -> None:
         """
         Run the drone in the appropriate mode based on debug settings.
@@ -2723,23 +2727,12 @@ class SimplePayloadDrone:
             )
         
         # Wait for shutdown event while worker threads process in background
+        self._logger.info("Waiting for shutdown signal...")
         self._shutdown_event.wait()
+        self._logger.info("Shutdown signal received, cleaning up...")
         # Automatically cleanup resources when shutdown occurs
-        self._cleanup_resources()
+        self.cleanup()
     
-    def shutdown(self) -> None:
-        """
-        Signal the drone to shut down gracefully.
-        
-        Args:
-            None
-            
-        Returns:
-            None
-        """
-        self._logger.info("Shutdown requested")
-        self._shutdown_event.set()
-
     def start(self, show_preview: bool = True) -> None:
         """
         Start the drone system.
@@ -3159,6 +3152,13 @@ def get_args() -> argparse.Namespace:
 
     # Telemetry parameters
     parser.add_argument(
+        "--telemetry-persist",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep telemetry and UDP publisher threads running",
+        type=bool
+    )
+    parser.add_argument(
         "--telemetry-rate",
         default=1.0,
         help="Telemetry publishing rate in Hz (0 = disable telemetry)",
@@ -3212,10 +3212,10 @@ def main() -> None:
         drone.run()
     except KeyboardInterrupt:
         drone.logger.info("Received keyboard interrupt, shutting down...")
-        drone.shutdown()
+        drone.cleanup()
     except Exception as e:
         drone.logger.error(f"Application error: {e}")
-        drone.shutdown()
+        drone.cleanup()
 
 if __name__ == "__main__":
     
