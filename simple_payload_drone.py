@@ -191,6 +191,7 @@ class SimplePayloadDrone:
         self.takeoff_alt_threshold = args.takeoff_alt_threshold
         self.takeoff_target_alt = args.takeoff_target_alt
         # Telemetry parameters
+        self.telemetry_persist = args.telemetry_persist
         self.telemetry_rate = args.telemetry_rate
         # Waypoint parameters
         self.wpt_json_dir = args.wpt_json_dir
@@ -2147,12 +2148,15 @@ class SimplePayloadDrone:
             self._stop_land_worker()
         if self._takeoff_thread is not None:
             self._stop_takeoff_worker()
-        if self._telemetry_thread is not None:
+        if self._telemetry_thread is not None and not self.telemetry_persist:
             self._stop_telemetry_worker()
-        if self._udp_thread is not None:
+        if self._udp_thread is not None and not self.telemetry_persist:
             self._stop_udp_publisher()
         
-        self._logger.info("All threads stopped")
+        if self.telemetry_persist:
+            self._logger.info("All threads stopped (telemetry and UDP persist)")
+        else:
+            self._logger.info("All threads stopped")
 
     ###############################
     ### Thread worker functions ###
@@ -3147,6 +3151,13 @@ def get_args() -> argparse.Namespace:
     )
 
     # Telemetry parameters
+    parser.add_argument(
+        "--telemetry-persist",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep telemetry and UDP publisher threads running",
+        type=bool
+    )
     parser.add_argument(
         "--telemetry-rate",
         default=1.0,
