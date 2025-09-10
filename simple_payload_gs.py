@@ -506,7 +506,7 @@ class SimplePayloadGroundStation:
             app, 
             host=self.socketio_host,
             port=self.socketio_port,
-            log_level="warning",
+            log_level="info",
             access_log=False
         )
         server = uvicorn.Server(config)
