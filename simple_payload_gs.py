@@ -500,7 +500,7 @@ class SimplePayloadGroundStation:
             return
             
         # Create ASGI app with Socket.IO server
-        app = socketio.ASGIApp(self._sio_server, socketio_path="/socket.io")
+        app = socketio.ASGIApp(self._sio_server, socketio_path="/ws/socket.io")
         # Configure uvicorn server with appropriate settings
         config = uvicorn.Config(
             app, 
