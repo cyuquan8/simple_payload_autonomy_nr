@@ -16,7 +16,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from dronekit import connect, LocationGlobalRelative, VehicleMode
 from geographiclib.geodesic import Geodesic
-from message_types import MessageType, RTLStatus, TakeoffStatus, WaypointStatus 
+from message_types import (
+    MessageType,
+    LandStatus,
+    RTLStatus, 
+    TakeoffStatus, 
+    WaypointStatus, 
+)
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import (
@@ -158,6 +164,7 @@ class SimplePayloadDrone:
         self.debug_detect = args.debug_detect
         self.debug_detect_no_vehicle = args.debug_detect_no_vehicle
         self.debug_goto_waypoints = args.debug_goto_waypoints
+        self.debug_land = args.debug_land
         self.debug_rtl = args.debug_rtl
         self.debug_takeoff = args.debug_takeoff
         self.debug_telemetry = args.debug_telemetry
@@ -173,6 +180,10 @@ class SimplePayloadDrone:
         self.vflip = args.vflip
         # Drone parameters
         self.drone_id = args.drone_id
+        # Flight parameters
+        self.final_action = args.final_action
+        # Land parameters
+        self.landing_alt = args.landing_alt
         # RTL parameters
         self.rtl_alt = args.rtl_alt
         self.rtl_landing_alt = args.rtl_landing_alt
@@ -204,6 +215,9 @@ class SimplePayloadDrone:
         # Goto waypoints thread
         self._goto_waypoints_thread = None
         self._goto_waypoints_active = False
+        # Land worker thread
+        self._land_thread = None
+        self._land_active = False
         # Return to launch worker thread
         self._return_to_launch_thread = None
         self._return_to_launch_active = False
@@ -227,7 +241,7 @@ class SimplePayloadDrone:
         # Flight sequence coordination events
         self._takeoff_complete = threading.Event()
         self._waypoints_complete = threading.Event()
-        self._rtl_complete = threading.Event()
+        self._rtl_or_land_complete = threading.Event()
         
         # Setup comms
         self._vehicle = None
@@ -703,6 +717,26 @@ class SimplePayloadDrone:
         # Return distance in metres
         return result['s12']
     
+    def _get_land_payload(
+            self, 
+            status: LandStatus, 
+            altitude: float
+        ) -> dict[str, Any]:
+        """
+        Create land message payload.
+        
+        Args:
+            status: Land status from LandStatus enum
+            altitude: Current altitude in meters
+            
+        Returns:
+            dict[str, Any]: Land payload dictionary
+        """
+        return {
+            'status': status,
+            'altitude': altitude,
+        }
+
     def _get_rtl_payload(
             self, 
             status: RTLStatus, 
@@ -867,6 +901,149 @@ class SimplePayloadDrone:
             raise RuntimeError(msg)
         elif self._shutdown_event.is_set():
             msg = "Waypoint navigation interrupted by shutdown"
+            self._logger.info(msg)
+            raise RuntimeError(msg)
+
+    def _land(self) -> None:
+        """
+        Execute land using DroneKit LAND mode.
+        
+        Commands the vehicle to land at current position and monitors progress 
+        until the vehicle lands (reaches near-ground altitude) or the operation 
+        is interrupted.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If vehicle is None, land is interrupted due to mode 
+                change, or land is interrupted by shutdown
+            
+        Note:
+            This function blocks until the vehicle reaches the configured 
+            landing altitude threshold or the land operation is interrupted. 
+            Monitors altitude every 500ms.
+        """
+        # Validate vehicle availability
+        if self._vehicle is None:
+            self._land_active = False
+            raise RuntimeError("Vehicle is None")
+        
+        # Wait for appropriate trigger based on running threads
+        if self.debug_land and not self.debug_takeoff and \
+            not self.debug_goto_waypoints:
+            # Debug land only (no takeoff or waypoints)
+            # Wait for vehicle to be ready (GUIDED mode)
+            self._logger.info("Waiting for vehicle to be ready for land...")
+            while self._land_active and \
+                not self._shutdown_event.is_set():
+                current_mode = self._vehicle.mode.name
+                if current_mode == "GUIDED":
+                    self._logger.info("Vehicle is ready - in GUIDED mode")
+                    break
+                else:
+                    self._logger.debug(
+                        f"Waiting for GUIDED mode (currently {current_mode})"
+                    )
+                    time.sleep(0.5)  # Check every 500ms
+            # Check for shutdown during GUIDED mode wait
+            if self._shutdown_event.is_set():
+                raise RuntimeError(
+                    "Land interrupted by shutdown while waiting for GUIDED mode"
+                )
+        else:
+            # Normal mode or with other flight threads
+            # Wait for waypoints completion
+            self._logger.info("Waiting for waypoints completion...")
+            while not self._waypoints_complete.is_set() and \
+                not self._shutdown_event.is_set():
+                self._waypoints_complete.wait(timeout=1.0)
+            # Check if we should proceed with land
+            if self._shutdown_event.is_set():
+                raise RuntimeError(
+                    "Land interrupted by shutdown during waypoints wait"
+                )
+            # Check if vehicle is in GUIDED mode before land
+            current_mode = self._vehicle.mode.name
+            if current_mode != "GUIDED":
+                self._logger.warning(
+                    f"Vehicle not in GUIDED mode (currently {current_mode}). "
+                    f"Cannot start land safely."
+                )
+                self._land_active = False
+                raise RuntimeError(
+                    f"Vehicle not in GUIDED mode: {current_mode}"
+                )
+        
+        # Land
+        self._logger.info("Starting land")
+        # Set vehicle mode to LAND
+        self._vehicle.mode = VehicleMode("LAND")
+        # Send land started message to ground station
+        if self.udp_pub:
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            land_payload = self._get_land_payload(
+                LandStatus.STARTED, 
+                current_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.LAND, 
+                land_payload
+            )
+            self._enqueue_message(message_bytes)
+        
+        # Monitor landing progress
+        while self._land_active and not self._shutdown_event.is_set():
+            # Get current altitude first
+            current_altitude = self._vehicle.location.global_relative_frame.alt
+            self._logger.debug(f"Altitude: {current_altitude:.2f}m")
+            # Check if vehicle is still in LAND mode
+            current_mode = self._vehicle.mode.name
+            if current_mode != "LAND":
+                self._logger.warning(
+                    f"Land warning - vehicle changed to {current_mode} mode"
+                )
+            # Check if we've reached near-ground altitude (landing complete)
+            if current_altitude <= self.landing_alt:
+                self._logger.info(
+                    f"Landing completed: {current_altitude:.2f}m"
+                )
+                # Send land completed message to ground station
+                if self.udp_pub:
+                    land_payload = self._get_land_payload(
+                        LandStatus.COMPLETED, 
+                        current_altitude
+                    )
+                    message_bytes = self._encode_message(
+                        MessageType.LAND, 
+                        land_payload
+                    )
+                    self._enqueue_message(message_bytes)
+                return
+            time.sleep(0.5)  # Check every 500ms
+        
+        # If we reach here, land was interrupted (mode change or shutdown)
+        # Send abort message with current altitude
+        if self.udp_pub:
+            land_payload = self._get_land_payload(
+                LandStatus.ABORTED, 
+                current_altitude
+            )
+            message_bytes = self._encode_message(
+                MessageType.LAND, 
+                land_payload
+            )
+            self._enqueue_message(message_bytes)
+        # Raise appropriate exception message
+        if not self._land_active:
+            msg = "Land interrupted due to mode change"
+            self._logger.warning(msg)
+            raise RuntimeError(msg)
+        elif self._shutdown_event.is_set():
+            msg = "Land interrupted by shutdown"
             self._logger.info(msg)
             raise RuntimeError(msg)
 
@@ -1527,7 +1704,7 @@ class SimplePayloadDrone:
         # Clear flight sequence coordination events
         self._takeoff_complete.clear()
         self._waypoints_complete.clear()
-        self._rtl_complete.clear()
+        self._rtl_or_land_complete.clear()
         self._logger.info("Drone cleanup complete")
 
     def _start_camera_pitch_worker(self) -> None:
@@ -1670,6 +1847,53 @@ class SimplePayloadDrone:
             else:
                 self._logger.info("Goto waypoints worker thread stopped")
             self._goto_waypoints_thread = None
+
+    def _start_land_worker(self) -> None:
+        """
+        Start the land worker thread.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+            
+        Raises:
+            RuntimeError: If land worker is already started
+        """
+        if self._land_thread is not None:
+            raise RuntimeError("Land worker already started")
+        
+        self._land_active = True
+        self._land_thread = threading.Thread(
+            target=self._land_worker,
+            daemon=True,
+            name="Land-Worker"
+        )
+        self._land_thread.start()
+        self._logger.info("Started land worker thread")
+
+    def _stop_land_worker(self) -> None:
+        """
+        Stop the land worker thread gracefully.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        if self._land_thread is not None:
+            self._logger.info("Stopping land worker...")
+            self._land_active = False
+            self._land_thread.join(timeout=5.0)
+            if self._land_thread.is_alive():
+                self._logger.warning(
+                    "Land worker thread did not stop gracefully"
+                )
+            else:
+                self._logger.info("Land worker thread stopped")
+            self._land_thread = None
 
     def _start_return_to_launch_worker(self) -> None:
         """
@@ -1873,14 +2097,20 @@ class SimplePayloadDrone:
         # Check for incompatible debug modes
         vehicle_required_modes = [
             self.debug_camera, self.debug_detect, self.debug_goto_waypoints,
-            self.debug_rtl, self.debug_takeoff, self.debug_telemetry
+            self.debug_land, self.debug_rtl, self.debug_takeoff, 
+            self.debug_telemetry
         ]
         if any(vehicle_required_modes) and self.debug_detect_no_vehicle:
             raise RuntimeError(
                 "debug_detect_no_vehicle cannot be used with modes that "
                 "require vehicle connection: debug_camera, debug_detect, "
-                "debug_goto_waypoints, debug_rtl, debug_takeoff, "
+                "debug_goto_waypoints, debug_land, debug_rtl, debug_takeoff, "
                 "debug_telemetry"
+            )
+        if self.debug_rtl and self.debug_land:
+            raise RuntimeError(
+                "debug_rtl and debug_land cannot both be enabled - "
+                "these are conflicting final actions"
             )
 
         if self.debug_camera:
@@ -1891,6 +2121,8 @@ class SimplePayloadDrone:
             self._start_goto_waypoints_worker()
         if self.debug_rtl:
             self._start_return_to_launch_worker()
+        if self.debug_land:
+            self._start_land_worker()
         if self.debug_takeoff:
             self._start_takeoff_worker()
         if self.debug_telemetry:
@@ -1901,13 +2133,17 @@ class SimplePayloadDrone:
             self.debug_detect_no_vehicle or 
             self.debug_goto_waypoints or
             self.debug_rtl or
+            self.debug_land or
             self.debug_takeoff or
             self.debug_telemetry
         ):
             self._start_camera_pitch_worker()
             self._start_detection_worker()
             self._start_goto_waypoints_worker()
-            self._start_return_to_launch_worker()
+            if self.final_action == "land":
+                self._start_land_worker()
+            elif self.final_action == "rtl":
+                self._start_return_to_launch_worker()
             self._start_takeoff_worker()
             self._start_telemetry_worker()
         
@@ -1936,6 +2172,8 @@ class SimplePayloadDrone:
             self._stop_goto_waypoints_worker()
         if self._return_to_launch_thread is not None:
             self._stop_return_to_launch_worker()
+        if self._land_thread is not None:
+            self._stop_land_worker()
         if self._takeoff_thread is not None:
             self._stop_takeoff_worker()
         if self._telemetry_thread is not None:
@@ -2261,6 +2499,37 @@ class SimplePayloadDrone:
                 self.shutdown()
         self._logger.info("Goto waypoints worker stopped")
 
+    def _land_worker(self) -> None:
+        """
+        Worker thread function to handle land operations.
+        
+        Args:
+            None
+            
+        Returns:
+            None
+        """
+        self._logger.info("Land worker started")
+        
+        # Wait for synchronized start signal
+        self._start_event.wait()
+        self._logger.info("Land worker ready to begin processing")
+        
+        try:
+            # Execute land using helper function
+            self._land()
+            self._logger.info("Land completed successfully")
+            self._rtl_or_land_complete.set()  # Signal land completion
+            # Land is always the final flight phase - trigger shutdown
+            self._logger.info("Land complete - shutting down")
+            self.shutdown()
+        except Exception as e:
+            self._logger.error(f"Error during land: {e}")
+            self._land_active = False
+            self.shutdown()
+        
+        self._logger.info("Land worker stopped")
+
     def _return_to_launch_worker(self) -> None:
         """
         Worker thread function to handle return to launch operations.
@@ -2281,7 +2550,7 @@ class SimplePayloadDrone:
             # Execute return to launch using helper function
             self._return_to_launch()
             self._logger.info("Return to launch completed successfully")
-            self._rtl_complete.set()  # Signal RTL completion
+            self._rtl_or_land_complete.set()  # Signal RTL completion
             # RTL is always the final flight phase - trigger shutdown
             self._logger.info("Return to launch complete - shutting down")
             self.shutdown()
@@ -2444,10 +2713,14 @@ class SimplePayloadDrone:
             self._logger.info("Running in goto-waypoints-only mode")
         elif self.debug_rtl:
             self._logger.info("Running in return-to-launch-only mode")
+        elif self.debug_land:
+            self._logger.info("Running in land-only mode")
         elif self.debug_takeoff:
             self._logger.info("Running in takeoff-only mode")
         else:
-            self._logger.info("Running in default mode")
+            self._logger.info(
+                f"Running in default mode (final action: {self.final_action})"
+            )
         
         # Wait for shutdown event while worker threads process in background
         self._shutdown_event.wait()
@@ -2545,6 +2818,12 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Runs go to waypoints only with vehicle connection"
+    )
+    parser.add_argument(
+        "--debug-land",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Runs land only with vehicle connection"
     )
     parser.add_argument(
         "--debug-rtl",
@@ -2828,6 +3107,23 @@ def get_args() -> argparse.Namespace:
         default="drone_0",
         help="Drone identification string",
         type=str
+    )
+
+    # Flight parameters
+    parser.add_argument(
+        "--final-action",
+        choices=["rtl", "land"],
+        default="rtl",
+        help="Final action to perform: rtl or land",
+        type=str
+    )
+
+    # Land parameters
+    parser.add_argument(
+        "--landing-alt",
+        default=0.05,
+        help="Landing completion altitude threshold in meters",
+        type=float
     )
 
     # RTL parameters
