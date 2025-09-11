@@ -1390,9 +1390,14 @@ class SimplePayloadDrone:
         
         # RTL
         self._logger.info("Starting return to launch")
-        # Set RTL altitude parameter
-        self._logger.info(f"Setting RTL altitude to {self.rtl_alt}m")
-        self._vehicle.parameters['RTL_ALT'] = self.rtl_alt * 100 # Convert to cm
+        # Set RTL altitude parameter only if not using rally points
+        if not self.use_rally:
+            self._logger.info(f"Setting RTL altitude to {self.rtl_alt}m")
+            self._vehicle.parameters['RTL_ALT'] = self.rtl_alt * 100  # Convert to cm
+        else:
+            self._logger.info(
+                "Using rally points for RTL - rally point altitude will be used"
+            )
         # Set vehicle mode to RTL
         self._vehicle.mode = VehicleMode("RTL")
         # Send RTL started message to ground station
