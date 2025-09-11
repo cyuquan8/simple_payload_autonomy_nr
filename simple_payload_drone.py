@@ -204,6 +204,16 @@ class SimplePayloadDrone:
         self.wpt_arrival_threshold_frac = args.wpt_arrival_threshold_frac
         self.wpt_arrival_threshold_use_dist = \
             args.wpt_arrival_threshold_use_dist
+        # Rally point parameters
+        self.max_rally_points = args.max_rally_points
+        self.rally_json_dir = args.rally_json_dir
+        self.rally_json_filename = args.rally_json_filename
+        self.rally_json_filepath = os.path.join(
+            self.rally_json_dir,
+            self.rally_json_filename
+        )
+        self.use_rally = args.use_rally
+        self._rally_points = []  # List to store loaded rally points
         
         # Threads
         
@@ -1048,6 +1058,125 @@ class SimplePayloadDrone:
             self._logger.info(msg)
             raise RuntimeError(msg)
 
+    def _parse_json_to_rally_points(
+            self, 
+            filepath: str
+        ) -> list[LocationGlobalRelative] | None:
+        """
+        Parse rally point data from a JSON file into LocationGlobalRelative 
+        objects.
+        
+        Reads a JSON file containing rally point data organized by drone_id with 
+        lat/lon/alt coordinates and converts them into DroneKit 
+        LocationGlobalRelative objects for rally point setup.
+        
+        Args:
+            filepath: Path to the JSON file containing rally point data
+        
+        Returns:
+            list[LocationGlobalRelative] | None: List of rally point locations 
+                if successful, None if file not found, invalid JSON, drone_id 
+                not found, or other errors occur
+        
+        Expected JSON format:
+            {
+                "drone_0": [
+                    {"lat": float, "lon": float, "alt": float},
+                    {"lat": float, "lon": float, "alt": float},
+                    ...
+                ],
+                "drone_1": [...]
+            }
+        """
+        try:
+            rally_objects: list[LocationGlobalRelative] = []
+            with open(filepath, 'r') as file:
+                data = json.load(file)
+            
+            # Validate data structure
+            if not isinstance(data, dict):
+                self._logger.error(
+                    f"Invalid JSON structure in {filepath}: expected dict, "
+                    f"got {type(data).__name__}"
+                )
+                return None
+            
+            # Check if current drone_id exists in the data
+            if self.drone_id not in data:
+                self._logger.error(
+                    f"Drone ID '{self.drone_id}' not found in {filepath}. "
+                    f"Available drone IDs: {list(data.keys())}"
+                )
+                return None
+            
+            # Get rally point list for current drone
+            drone_rally_points = data[self.drone_id]
+            if not isinstance(drone_rally_points, list):
+                self._logger.error(
+                    f"Invalid rally point data for drone '{self.drone_id}' in "
+                    f"{filepath}: expected list, got "
+                    f"{type(drone_rally_points).__name__}"
+                )
+                return None
+            
+            # Parse each rally point dictionary into LocationGlobalRelative
+            for i, rally_data in enumerate(drone_rally_points):
+                if not isinstance(rally_data, dict):
+                    self._logger.error(
+                        f"Invalid rally point at index {i} for drone "
+                        f"'{self.drone_id}' in {filepath}: expected dict, got "
+                        f"{type(rally_data).__name__}"
+                    )
+                    return None
+                
+                # Validate required keys (no speed for rally points)
+                required_keys = {'lat', 'lon', 'alt'}
+                if not required_keys.issubset(rally_data.keys()):
+                    missing_keys = required_keys - rally_data.keys()
+                    self._logger.error(
+                        f"Missing required keys {missing_keys} in rally point "
+                        f"{i} for drone '{self.drone_id}' from {filepath}"
+                    )
+                    return None
+                
+                # Create LocationGlobalRelative object
+                try:
+                    rally_location = LocationGlobalRelative(
+                        rally_data['lat'],
+                        rally_data['lon'], 
+                        rally_data['alt']
+                    )
+                    rally_objects.append(rally_location)
+                    self._logger.debug(
+                        f"Parsed rally point {i}: "
+                        f"lat={rally_data['lat']}, lon={rally_data['lon']}, "
+                        f"alt={rally_data['alt']}"
+                    )
+                except (ValueError, TypeError) as e:
+                    self._logger.error(
+                        f"Invalid coordinate values in rally point {i} for "
+                        f"drone '{self.drone_id}' from {filepath}: {e}"
+                    )
+                    return None
+            
+            self._logger.info(
+                f"Successfully parsed {len(rally_objects)} rally points "
+                f"for drone '{self.drone_id}' from {filepath}"
+            )
+
+            return rally_objects
+        except FileNotFoundError:
+            self._logger.error(f"Rally points file not found: {filepath}")
+            return None
+        except json.JSONDecodeError as e:
+            self._logger.error(f"Invalid JSON format in {filepath}: {e}")
+            return None
+        except Exception as e:
+            self._logger.error(
+                f"Unexpected error parsing rally points from {filepath}: {e}"
+            )
+            return None
+
     def _parse_json_to_waypoints(
             self, 
             filepath: str
@@ -1331,6 +1460,78 @@ class SimplePayloadDrone:
             msg = "Return to launch interrupted by shutdown"
             self._logger.info(msg)
             raise RuntimeError(msg)
+
+    def _setup_rally_points(self) -> bool:
+        """
+        Setup rally points using MAVLink commands.
+        
+        Loads rally points from JSON file and configures them on the vehicle
+        using MAVLink rally point commands. Enables rally point usage for RTL.
+        
+        Returns:
+            bool: True if rally points were setup successfully, False otherwise
+        """
+        if not self.use_rally:
+            self._logger.debug("Rally points disabled, skipping setup")
+            return True
+            
+        # Use pre-loaded rally points
+        rally_points = self._rally_points
+        if rally_points is None:
+            self._logger.error("No rally points available")
+            return False
+        if len(rally_points) == 0:
+            self._logger.warning("No rally points to setup")
+            return False
+            
+        # Limit to maximum supported rally points
+        if len(rally_points) > self.max_rally_points:
+            self._logger.warning(
+                f"Too many rally points ({len(rally_points)}), "
+                f"limiting to {self.max_rally_points}"
+            )
+            rally_points = rally_points[:self.max_rally_points]
+        
+        try:
+            self._logger.info(f"Setting up {len(rally_points)} rally points...")
+            
+            # Enable rally points for RTL
+            self._vehicle.parameters['RALLY_TOTAL'] = len(rally_points)
+            self._vehicle.parameters['RTL_RALLY'] = 1  # Use rally for RTL
+            
+            # Send each rally point via MAVLink
+            for i, rally_point in enumerate(rally_points):
+                self._logger.debug(
+                    f"Setting rally point {i}: lat={rally_point.lat}, "
+                    f"lon={rally_point.lon}, alt={rally_point.alt}"
+                )
+                
+                # Create rally point MAVLink message
+                msg = self._vehicle.message_factory.rally_point_encode(
+                    target_system=self._vehicle._master.target_system,
+                    target_component=self._vehicle._master.target_component,
+                    idx=i,                          # Rally point index
+                    count=len(rally_points),        # Total rally points
+                    lat=int(rally_point.lat * 1e7), # Latitude in degE7
+                    lng=int(rally_point.lon * 1e7), # Longitude in degE7
+                    alt=int(rally_point.alt * 100), # Altitude in cm
+                    break_alt=0,                    # Break altitude (0 = current)
+                    land_dir=0,                     # Landing direction (0 = any)
+                    flags=0                         # Flags
+                )
+                # Send the message
+                self._vehicle.send_mavlink(msg)
+                self._vehicle.flush()
+            
+            self._logger.info(
+                f"Successfully configured {len(rally_points)} rally points "
+                f"for RTL operations"
+            )
+
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to setup rally points: {e}")
+            return False
 
     def _takeoff(self, target_altitude: float) -> None:
         """
@@ -2768,6 +2969,18 @@ class SimplePayloadDrone:
         self._pwm.start(5) # neutral (0 degrees)
         self.base_angle = 35  # servo neutral position (camera tilted)
 
+        # Setup rally points if enabled and vehicle is connected
+        if self.use_rally and self._vehicle is not None:
+            self._rally_points = self._parse_json_to_rally_points(
+                self.rally_json_filepath
+            )
+            if self._rally_points:
+                self._setup_rally_points()
+            else:
+                self._logger.warning(
+                    f"No rally points loaded from {self.rally_json_filepath}"
+                )
+
         # Start all required threads
         self._start_threads()
         
@@ -2854,6 +3067,12 @@ def get_args() -> argparse.Namespace:
         "--labels-dir",
         default="/home/useradmin/simple_payload_autonomy_nr/labels",
         help="Path to directory containing labels",
+        type=str
+    )
+    parser.add_argument(
+        "--rally-json-dir",
+        default="./rally_points/",
+        help="Directory containing rally point JSON files",
         type=str
     )
     parser.add_argument(
@@ -3148,6 +3367,27 @@ def get_args() -> argparse.Namespace:
         default=30.0,
         help="Takeoff target altitude in meters",
         type=float
+    )
+
+    # Rally point parameters
+    parser.add_argument(
+        "--rally-json-filename",
+        default="rally_points.json",
+        help="JSON filename for rally points",
+        type=str
+    )
+    parser.add_argument(
+        "--use-rally",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use rally points for RTL instead of home position",
+        type=bool
+    )
+    parser.add_argument(
+        "--max-rally-points",
+        default=10,
+        help="Maximum number of rally points to load (default: 10)",
+        type=int
     )
 
     # Telemetry parameters
