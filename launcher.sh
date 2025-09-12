@@ -1,0 +1,16 @@
+#!/bin/bash
+cd /home/useradmin/simple_payload_autonomy_nr
+
+# Start WFB service
+sudo systemctl start wifibroadcast@drone
+
+# Buffer
+sleep 45
+
+# Run with venv python directly (no need for activate)
+# Simple payload drone
+sudo venv/bin/python simple_payload_drone.py \
+    --drone-id drone_0 \
+    --wpt-json-filename scr_waypoints.json \
+    --takeoff-target-alt 30.0 \
+    --rtl-alt 30.0
