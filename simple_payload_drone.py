@@ -178,6 +178,15 @@ class SimplePayloadDrone:
         self.max_detections = args.max_detections
         self.threshold = args.threshold
         self.vflip = args.vflip
+        self.image_save_dir = args.image_save_dir
+        self.save_images = args.save_images
+        if self.save_images:
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.image_save_dir = os.path.join(
+                self.image_save_dir, 
+                f"drone_session_{session_timestamp}"
+            )
+            os.makedirs(self.image_save_dir, exist_ok=True)
         # Drone parameters
         self.drone_id = args.drone_id
         # Flight parameters
@@ -545,6 +554,43 @@ class SimplePayloadDrone:
         ]
         
         return new_detections, image_array
+
+    def _save_image(
+            self, 
+            image: np.ndarray, 
+            detections: list[Detection]
+        ) -> str | None:
+        """
+        Save numpy image array to file with timestamp.
+        
+        Args:
+            image: NumPy image array
+            detections: List of detections found in image
+            
+        Returns:
+            str: Saved image filepath, or None if saving failed
+        """
+        try:
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
+            
+            # Create clean filename from timestamp
+            clean_timestamp = timestamp.replace(':', '-').replace('.', '_')
+            detection_count = len(detections)
+            filename = f"drone_{clean_timestamp}_det{detection_count}.jpg"
+            filepath = os.path.join(self.image_save_dir, filename)
+            
+            # Save image using OpenCV
+            success = cv2.imwrite(filepath, image)
+            if success:
+                self._logger.debug(f"Saved image to: {filepath}")
+                return filepath
+            else:
+                self._logger.error(f"Failed to save image to: {filepath}")
+                return None
+        except Exception as e:
+            self._logger.error(f"Failed to save image: {e}")
+            return None
 
     ################################
     ### Drawing helper functions ###
@@ -2435,6 +2481,9 @@ class SimplePayloadDrone:
                 if current_detections and current_image is not None:
                     with self._detections_lock:
                         self._last_detections = current_detections
+                    # Save image with detections if enabled
+                    if self.save_images:
+                        self._save_image(current_image, current_detections)
                 else:
                     continue
                     
@@ -3063,6 +3112,12 @@ def get_args() -> argparse.Namespace:
     
     # Directories
     parser.add_argument(
+        "--image-save-dir",
+        default="./images/",
+        help="Directory to save detection images",
+        type=str
+    )
+    parser.add_argument(
         "--model-dir", 
         default="/home/useradmin/simple_payload_autonomy_nr/imx500-models/", 
         help="Path to directory containing models",
@@ -3316,6 +3371,12 @@ def get_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True, 
         help="Whether to flip input image over vertical plane"
+    )
+    parser.add_argument(
+        "--save-images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save detection images to disk"
     )
 
     # Drone parameters
