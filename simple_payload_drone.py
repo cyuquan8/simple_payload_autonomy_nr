@@ -3260,9 +3260,9 @@ def get_args() -> argparse.Namespace:
     # Connection / Comms parameters
     parser.add_argument(
         "--rpi-baud-rate",
-        default=57600,
+        default=None,
         help="Raspberry Pi to FCU Baud rate",
-        type=int
+        type=str
     )
     parser.add_argument(
         "--rpi-serial-port",
