@@ -182,12 +182,13 @@
    ```
    ethtool -i wlan1
    ```
-   Refer to [wfb-ng Setup HOWTO](https://github.com/svpcom/wfb-ng/wiki/Setup-HOWTO) for config file setup, notably `/etc/sysctl.conf`, `/etc/wifibroadcast.cfg`, `/etc/default/wifibroadcast`, `/etc/NetworkManager/NetworkManager.conf`, `/etc/dhcpcd.conf`.
+   Refer to [wfb-ng Setup HOWTO](https://github.com/svpcom/wfb-ng/wiki/Setup-HOWTO) for config file setup, notably `/etc/sysctl.conf`, `/etc/wifibroadcast.cfg`, `/etc/default/wifibroadcast`, `/etc/NetworkManager/NetworkManager.conf`, `/etc/dhcpcd.conf`. Use `wlan1` for all interfaces. 
 
 6. **Add GS Key**
-    - Place your GS key into `/etc`.
 
-7. **Enable and start wifibroadcast@gs service**
+   Place your GS key into `/etc`.
+
+8. **Enable and start wifibroadcast@gs service**
     ```bash
     sudo systemctl enable wifibroadcast@gs
     sudo systemctl start wifibroadcast@gs
@@ -195,7 +196,7 @@
     
 9. **Install QGroundControl or Mission Planner**
 
-   On the GUI, choose UDP connection and enter the port number matching the drone
+   On the application GUI, choose UDP connection and enter the port number matching the drone.
 
 ## Multi Drone Config
 
