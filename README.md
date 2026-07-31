@@ -138,14 +138,14 @@
     ```
 
 ### Ubuntu laptop with QGC/Mission Planner installed
-1. **Rename the wfb adapter to `wlan1` using systemd `.link` or `udev`.
+1. **Rename the wfb adapter to `wlan1` using systemd `.link` or `udev`.**
 
-2. **Check if `rtl88xxau_wfb` is the driver for the wfb adapter. Most probably it is `rtw88_8812au`.
+2. **Check if `rtl88xxau_wfb` is the driver for the wfb adapter. Most probably it is `rtw88_8812au`.**
    ```
    ethtool -i wlan1
    ```
 
-3. **Remove and blacklist `rtw88_8812au`:
+3. **Remove and blacklist `rtw88_8812au`:**
    ```
    sudo systemctl stop NetworkManager
    sudo systemctl stop wpa_supplicant
@@ -167,7 +167,7 @@
    sudo modprobe -r rtw88_8812au rtw88_usb rtw88_core
    ```
    
-4. **Install patched `RTL8812AU` driver:
+4. **Install patched `RTL8812AU` driver:**
    ```
    sudo apt-get install dkms
    git clone -b v5.2.20 https://github.com/svpcom/rtl8812au.git
@@ -182,6 +182,23 @@
    ```
    ethtool -i wlan1
    ```
+   Refer to [wfb-ng Setup HOWTO](https://github.com/svpcom/wfb-ng/wiki/Setup-HOWTO) for config file setup, notably `/etc/sysctl.conf`, `/etc/wifibroadcast.cfg`, `/etc/default/wifibroadcast`, `/etc/NetworkManager/NetworkManager.conf`, `/etc/dhcpcd.conf`.
+
+6. **Add GS Key**
+    - Place your GS key into `/etc`.
+
+7. **Enable wifibroadcast@gs Service**
+    ```bash
+    sudo systemctl enable wifibroadcast@gs
+    ```
+    
+8. **Start wifibroadcast@gs service**
+    ```
+    sudo systemctl start wifibroadcast@gs
+    ```
+    
+9. **Install QGroundControl or Mission Planner**
+    On the GUI, choose UDP connection and enter the port number matching the drone
 
 ## Multi Drone Config
 
