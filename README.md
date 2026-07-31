@@ -88,7 +88,7 @@
     peer = 'listen://0.0.0.0:14551'   # incoming connection for drone 1
 
 ## Ground Station
-
+### Raspberry Pi 
 1. **Install Raspberry pi OS**
     - Use the Raspberry Pi Imager to install Raspberry Pi OS 64 bit for your Raspberry Pi model.
 
@@ -136,6 +136,53 @@
     mavproxy.py --master=udp:127.0.0.1:14551 --console --map
     python3 simple_payload_gs.py --socketio-port 8006 --save-images
     ```
+
+### Ubuntu laptop with QGC/Mission Planner installed
+1. **Rename the wfb adapter to `wlan1` using systemd `.link` or `udev`.
+
+2. **Check if `rtl88xxau_wfb` is the driver for the wfb adapter. Most probably it is `rtw88_8812au`.
+   ```
+   ethtool -i wlan1
+   ```
+
+3. **Remove and blacklist `rtw88_8812au`:
+   ```
+   sudo systemctl stop NetworkManager
+   sudo systemctl stop wpa_supplicant
+   sudo airmon-ng check kill
+   sudo nano /etc/modprobe.d/blacklist-rtw88-8812au.conf
+   ```
+   Paste the following into `/etc/modprobe.d/blacklist-rtw88-8812au.conf`:
+   ```
+   blacklist rtw88_8812au
+   blacklist rtw88_8821au
+   blacklist rtw88_8822bu
+   blacklist rtw88_8723du
+   blacklist rtw88_usb
+   blacklist rtw88_core
+   ```
+   Update initramfs and unload current modules
+   ```
+   sudo update-initramfs -u
+   sudo modprobe -r rtw88_8812au rtw88_usb rtw88_core
+   ```
+   
+4. **Install patched `RTL8812AU` driver:
+   ```
+   sudo apt-get install dkms
+   git clone -b v5.2.20 https://github.com/svpcom/rtl8812au.git
+   cd rtl8812au/
+   sudo ./dkms-install.sh
+   ```
+   Load new driver
+   ```
+   sudo modprobe 88XXau_wfb
+   ```
+   Verify:
+   ```
+   ethtool -i wlan1
+   ```
+
 ## Multi Drone Config
 
 1. **install mavproxy on drone in the venv created previously**
