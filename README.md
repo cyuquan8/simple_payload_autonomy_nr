@@ -187,18 +187,15 @@
 6. **Add GS Key**
     - Place your GS key into `/etc`.
 
-7. **Enable wifibroadcast@gs Service**
+7. **Enable and start wifibroadcast@gs service**
     ```bash
     sudo systemctl enable wifibroadcast@gs
-    ```
-    
-8. **Start wifibroadcast@gs service**
-    ```
     sudo systemctl start wifibroadcast@gs
     ```
     
 9. **Install QGroundControl or Mission Planner**
-    On the GUI, choose UDP connection and enter the port number matching the drone
+
+   On the GUI, choose UDP connection and enter the port number matching the drone
 
 ## Multi Drone Config
 
